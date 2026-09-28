@@ -43,14 +43,9 @@ pub struct GPow {
 }
 
 impl GPow {
-    /// Seeded with `g^0 = 1`, grown to cover index `upto` or the smallest memory
-    /// size, whichever is larger, with every exponent up to there announced.
-    /// Callers pass the bytecode size, which bounds the pcs and the return
-    /// targets; the memory floor covers the small powers a range check compares
-    /// against, which point anywhere below their bound rather than at an
-    /// allocation (§Memory).
+    /// Seeded with `g^0 = 1`, grown to cover index `upto`, every exponent up to
+    /// there announced.
     pub fn new(upto: usize) -> Self {
-        let upto = upto.max(1 << super::MIN_LOG_MEM);
         let mut g = Self::default();
         g.pow.push(F64::ONE);
         g.grow_to(upto);
@@ -89,8 +84,9 @@ impl GPow {
     }
 
     /// Announce that `g^k` may come back for inversion, because the interpreter
-    /// is about to store it in memory as an address. Idempotent.
+    /// is about to store it in memory as an address. Covers `k` first. Idempotent.
     pub fn note(&mut self, k: usize) {
+        self.grow_to(k);
         if self.noted.len() * 2 >= self.index.len() {
             self.widen();
         }

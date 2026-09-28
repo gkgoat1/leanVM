@@ -196,9 +196,12 @@ impl Program {
 
         let ending_pc = (self.prog.len() - 1) as u32; // last bytecode slot, g^{B-1}
 
-        // g^j and its reverse index g^j ↦ j, seeded for the program counters and
-        // return targets and grown on demand past that.
-        let mut g = GPow::new(self.prog.len() + 2);
+        // g^j and its reverse index g^j ↦ j, seeded for the pcs and return targets,
+        // the main frame and the range-check floor, then grown by each reservation.
+        let seed = (self.prog.len() + 2)
+            .max(self.main_frame as usize)
+            .max(1 << MIN_LOG_MEM);
+        let mut g = GPow::new(seed);
 
         // Dense write-once data memory (read path stays a vector for speed), the
         // per-cell access count (g^{count}, default g^0 = 1), and each cell's state.
@@ -778,19 +781,7 @@ impl Program {
                     let a1 = fp + o1;
                     let p = m.read(a1);
                     let p_addr = as_addr(p).ok_or_else(|| fail(Fault::WildPointer { value: p }))?;
-                    let base = match g.log(p_addr) {
-                        Some(b) => b,
-                        None => {
-                            // Not indexed yet: grow the g-power index to the minimum
-                            // memory size, since range-check touches point anywhere below
-                            // their bound (≤ 2^MIN_LOG_MEM), not just at allocated
-                            // frames/buffers. A value still absent is no valid
-                            // pointer: a wild deref, or a failed range check
-                            // (`assert log _ < _`) surfacing honestly.
-                            g.grow_to(1 << MIN_LOG_MEM);
-                            g.log(p_addr).ok_or_else(|| fail(Fault::WildPointer { value: p }))?
-                        }
-                    };
+                    let base = g.log(p_addr).ok_or_else(|| fail(Fault::WildPointer { value: p }))?;
                     let a2 = base + o2;
                     let a3 = fp + o3;
                     match mode {
