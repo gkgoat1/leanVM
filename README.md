@@ -36,7 +36,7 @@
   </tr>
   <tr>
     <td><a href="#fibonacci">cheap cycles</a></td>
-    <td align="right"><b>5.4M/s</b></td>
+    <td align="right"><b>6,2M/s</b></td>
   </tr>
 </table>
 
