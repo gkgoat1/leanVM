@@ -417,6 +417,13 @@ impl Program {
             None
         }
 
+        // A runtime count (a loop's frame span, a `HeapBuf` size) as the exponent of
+        // a g-power: the address table when it covers it, else a bounded discrete log.
+        fn count(g: &mut GPow, dlog: &mut Option<(GPow, F64)>, x: F64) -> Option<u32> {
+            g.log(x)
+                .or_else(|| bounded_dlog(dlog, x, MAX_CELLS.ilog2()).map(|n| n as u32))
+        }
+
         // The cell a heap run starts at: read the pointer back out of memory and
         // invert it. Shared by every hint that writes through one.
         fn heap_base(m: &Mem<'_>, g: &mut GPow, cell: u32, what: &'static str) -> Result<u32, Fault> {
@@ -552,33 +559,21 @@ impl Program {
                                             value: span,
                                         }));
                                     }
-                                    let max_frames = u64::from(MAX_CELLS.saturating_sub(next_free)) / u64::from(size);
-                                    let max_span = max_frames.saturating_sub(1) as usize;
-                                    let mut exponent = g.log(span);
-                                    while exponent.is_none() && g.covered() <= max_span {
-                                        g.grow_to((2 * g.covered()).min(max_span));
-                                        exponent = g.log(span);
-                                    }
-                                    let n = exponent.ok_or_else(|| fail(Fault::OutOfMemory))? + 1;
+                                    let n = count(&mut g, &mut dlog_cache, span)
+                                        .ok_or_else(|| fail(Fault::OutOfMemory))?
+                                        + 1;
                                     (ptr, size.checked_mul(n).ok_or_else(|| fail(Fault::OutOfMemory))?)
                                 }
                                 // A runtime size is carried in the exponent:
-                                // the cell holds g^k, allocate k cells (reverse
-                                // g-power lookup, growing the index if needed).
+                                // the cell holds g^k, allocate k cells.
                                 RHint::AllocDyn { ptr, size } => {
                                     let sz = in_k("HeapBuf size", m.get(fp + size)).map_err(fail)?;
-                                    let cells = match g.log(sz) {
-                                        Some(cells) => cells,
-                                        None => {
-                                            g.grow_to(1 << 20);
-                                            g.log(sz).ok_or_else(|| {
-                                                fail(Fault::NotAGPower {
-                                                    what: "HeapBuf size",
-                                                    value: sz,
-                                                })
-                                            })?
-                                        }
-                                    };
+                                    let cells = count(&mut g, &mut dlog_cache, sz).ok_or_else(|| {
+                                        fail(Fault::NotAGPower {
+                                            what: "HeapBuf size",
+                                            value: sz,
+                                        })
+                                    })?;
                                     (ptr, cells)
                                 }
                                 _ => unreachable!(),

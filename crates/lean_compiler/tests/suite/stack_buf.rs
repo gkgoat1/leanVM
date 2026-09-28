@@ -789,3 +789,25 @@ def main():
     let (proof, _) = prove(&program, want, lean_vm::pcs::TEST_LOG_INV_RATE).unwrap();
     verify(&program, &want, &proof).expect("three spellings of cell 2 agree");
 }
+
+/// A `HeapBuf` sized at run time is bounded by the address space alone, not by
+/// how far the g-power table happens to reach.
+#[test]
+fn heap_buf_runtime_size_beyond_the_g_power_table() {
+    let src = "\
+def main():
+    public = 1
+    n = public[1]
+    i = public[GEN]
+    buf = HeapBuf(n)
+    buf[i] = 7
+    return
+";
+    let program = compile(&parse(src).expect("parse"));
+    let size = (1 << 20) + 1;
+    let exec = program
+        .execute([F192::from(g_pow(size)), F192::from(g_pow(size - 1))])
+        .unwrap();
+    assert!(exec.unconstrained_reads.is_empty());
+    assert!(exec.mem_used > size);
+}
