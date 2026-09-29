@@ -270,7 +270,6 @@ dependencies = [
  "fiat_shamir",
  "parallel",
  "primitives",
- "serde",
  "tracing",
  "zk_alloc",
 ]

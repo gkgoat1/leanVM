@@ -117,7 +117,12 @@ fn bench(op: U64Op) {
         (proof, [witness_s, commit_s, zerocheck_s, lincheck_s, open_s, pass_s])
     };
 
-    let plan = Plan::from_env();
+    let env = |key: &str, default: usize| {
+        std::env::var(key).map_or(default, |s| {
+            s.parse().unwrap_or_else(|_| panic!("{key} must be an integer"))
+        })
+    };
+    let plan = Plan::new(env("BENCH_REPEAT", 1), env("BENCH_COOLDOWN", 2) as u64);
     let mut stages: [Timing; 6] = std::array::from_fn(|_| Timing::default());
     let (transcript, _) = plan.warm_then_measure(|_final_pass| {
         let (out, secs) = prove_pass();
