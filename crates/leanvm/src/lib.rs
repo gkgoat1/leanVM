@@ -6,7 +6,7 @@
 
 pub use rec_aggregation::{
     AggregateVerifyError, AggregationError, ClaimSelection, DA_LOG_CELL, DA_LOG_K, DA_MAX_ROWS, EthereumProof,
-    MAX_DA_ROOTS, MAX_EPOCHS, MAX_KEYS, MAX_RECURSIONS, SignatureClaims, SphincsClaim, XmssClaimGroup, aggregate,
+    MAX_DA_ROOTS, MAX_KEYS, MAX_LEAF_INDICES, MAX_RECURSIONS, SignatureClaims, SphincsClaim, XmssClaimGroup, aggregate,
 };
 
 pub use leanvm_core::{
@@ -27,7 +27,7 @@ pub mod xmss {
     /// them to call `as_ssz_bytes` and `from_ssz_bytes`.
     pub use ::xmss::{Decode, DecodeError, Encode};
     pub use ::xmss::{
-        Digest, Epoch, LOG_LIFETIME, MESSAGE_LEN, Message, PUB_KEY_SIZE, PUB_KEY_SSZ_LEN, PublicParam, SIG_SIZE,
+        Digest, LOG_LIFETIME, LeafIndex, MESSAGE_LEN, Message, PUB_KEY_SIZE, PUB_KEY_SSZ_LEN, PublicParam, SIG_SIZE,
         SIGNATURE_SSZ_LEN, WotsSignature, XmssKeyGenError, XmssPublicKey, XmssSecretKey, XmssSignError, XmssSignature,
         XmssVerifyError, key_gen, key_gen_from_seed, sign, verify,
     };

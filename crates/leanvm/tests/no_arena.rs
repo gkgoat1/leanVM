@@ -4,7 +4,7 @@
 
 use leanvm::*;
 
-const EPOCH: xmss::Epoch = 5;
+const LEAF_INDEX: xmss::LeafIndex = 5;
 
 #[test]
 fn aggregate_without_the_arena() {
@@ -15,9 +15,9 @@ fn aggregate_without_the_arena() {
     let message = [3; xmss::MESSAGE_LEN];
     let signers = (0..2)
         .map(|_| {
-            let (secret_key, pub_key) = xmss::key_gen(rng, EPOCH, EPOCH).unwrap();
-            let signature = xmss::sign(&secret_key, &message, EPOCH).unwrap();
-            (pub_key, EPOCH, message, signature)
+            let (secret_key, pub_key) = xmss::key_gen(rng, LEAF_INDEX, LEAF_INDEX).unwrap();
+            let signature = xmss::sign(&secret_key, &message, LEAF_INDEX).unwrap();
+            (pub_key, LEAF_INDEX, message, signature)
         })
         .collect();
 

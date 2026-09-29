@@ -14,9 +14,9 @@ fn blobs(n: usize, seed: u64) -> Vec<u64> {
 }
 
 /// Cached signers `[from, to)`, as the aggregation API takes them: each raw
-/// signature carries its epoch and message, the benchmarks using one pair for
+/// signature carries its leaf index and message, the benchmarks using one pair for
 /// all.
-fn signers(from: usize, to: usize) -> Vec<(XmssPublicKey, xmss::Epoch, xmss::Message, XmssSignature)> {
+fn signers(from: usize, to: usize) -> Vec<(XmssPublicKey, xmss::LeafIndex, xmss::Message, XmssSignature)> {
     if to == 0 {
         return Vec::new();
     }
@@ -25,7 +25,7 @@ fn signers(from: usize, to: usize) -> Vec<(XmssPublicKey, xmss::Epoch, xmss::Mes
         .map(|(pk, sig)| {
             (
                 pk.clone(),
-                signers_cache::XMSS_EPOCH_A,
+                signers_cache::XMSS_LEAF_INDEX_A,
                 signers_cache::message(),
                 sig.clone(),
             )

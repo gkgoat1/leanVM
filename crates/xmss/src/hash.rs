@@ -33,7 +33,7 @@ pub const STATE_LEN: usize = 32;
 
 /// `[protocol_domain_sep:1 | type:1 | layer:1 | zero:1 | p:4 | tree:4 | index:4]`, little endian.
 /// XMSS sets `layer` and `tree` to zero.
-/// `index` is the epoch (chain / wots_pk / encoding) or the Merkle node index;
+/// `index` is the leaf index (chain / wots_pk / encoding) or the Merkle node index;
 /// `sub_position` is the chain position or the Merkle level.
 pub fn make_tweak(tweak_type: u8, sub_position: u32, index: u32) -> Tweak {
     let mut tweak = [0u8; TWEAK_LEN];

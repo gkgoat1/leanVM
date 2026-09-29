@@ -9,77 +9,77 @@ namespace XmssSecurity.EncodingMonitor
 set_option maxRecDepth 100000
 
 structure State where
-  pending : Epoch → Finset Digest
-  signed : Epoch → Option Digest
+  pending : LeafIndex → Finset Digest
+  signed : LeafIndex → Option Digest
 
 def State.pendingCount (state : State) : Nat :=
-  ∑ epoch, (state.pending epoch).card
+  ∑ leafIndex, (state.pending leafIndex).card
 
-def State.addPending (state : State) (epoch : Epoch) (digest : Digest) : State :=
-  { state with pending := Function.update state.pending epoch (insert digest (state.pending epoch)) }
+def State.addPending (state : State) (leafIndex : LeafIndex) (digest : Digest) : State :=
+  { state with pending := Function.update state.pending leafIndex (insert digest (state.pending leafIndex)) }
 
-def State.install (state : State) (epoch : Epoch) (digest : Digest) : State :=
-  { pending := Function.update state.pending epoch ∅
-    signed := Function.update state.signed epoch (some digest) }
+def State.install (state : State) (leafIndex : LeafIndex) (digest : Digest) : State :=
+  { pending := Function.update state.pending leafIndex ∅
+    signed := Function.update state.signed leafIndex (some digest) }
 
-theorem State.pendingCount_addPending_le (state : State) (epoch : Epoch)
+theorem State.pendingCount_addPending_le (state : State) (leafIndex : LeafIndex)
     (digest : Digest) :
-    (state.addPending epoch digest).pendingCount ≤ state.pendingCount + 1 := by
+    (state.addPending leafIndex digest).pendingCount ≤ state.pendingCount + 1 := by
   classical
   unfold pendingCount addPending
   change (∑ candidate,
-      (Function.update state.pending epoch
-        (insert digest (state.pending epoch)) candidate).card) ≤ _
+      (Function.update state.pending leafIndex
+        (insert digest (state.pending leafIndex)) candidate).card) ≤ _
   have hupdate :
       (fun candidate =>
-        (Function.update state.pending epoch
-          (insert digest (state.pending epoch)) candidate).card) =
-        Function.update (fun candidate => (state.pending candidate).card) epoch
-          (insert digest (state.pending epoch)).card := by
+        (Function.update state.pending leafIndex
+          (insert digest (state.pending leafIndex)) candidate).card) =
+        Function.update (fun candidate => (state.pending candidate).card) leafIndex
+          (insert digest (state.pending leafIndex)).card := by
     funext candidate
-    by_cases heq : candidate = epoch <;> simp [heq]
+    by_cases heq : candidate = leafIndex <;> simp [heq]
   rw [hupdate]
-  rw [Finset.sum_update_of_mem (Finset.mem_univ epoch)]
+  rw [Finset.sum_update_of_mem (Finset.mem_univ leafIndex)]
   have hsum := Finset.sum_erase_add Finset.univ
-    (fun candidate => (state.pending candidate).card) (Finset.mem_univ epoch)
+    (fun candidate => (state.pending candidate).card) (Finset.mem_univ leafIndex)
   calc
-    (insert digest (state.pending epoch)).card +
-        ∑ candidate ∈ Finset.univ \ {epoch}, (state.pending candidate).card ≤
-      ((state.pending epoch).card + 1) +
-        ∑ candidate ∈ Finset.univ \ {epoch}, (state.pending candidate).card := by
+    (insert digest (state.pending leafIndex)).card +
+        ∑ candidate ∈ Finset.univ \ {leafIndex}, (state.pending candidate).card ≤
+      ((state.pending leafIndex).card + 1) +
+        ∑ candidate ∈ Finset.univ \ {leafIndex}, (state.pending candidate).card := by
           gcongr
-          exact Finset.card_insert_le digest (state.pending epoch)
-    _ = (∑ candidate ∈ Finset.univ \ {epoch},
-          (state.pending candidate).card) + (state.pending epoch).card + 1 := by
+          exact Finset.card_insert_le digest (state.pending leafIndex)
+    _ = (∑ candidate ∈ Finset.univ \ {leafIndex},
+          (state.pending candidate).card) + (state.pending leafIndex).card + 1 := by
       omega
     _ = (∑ candidate, (state.pending candidate).card) + 1 := by
       rw [Finset.sdiff_singleton_eq_erase, hsum]
 
-theorem State.pendingCount_install_add (state : State) (epoch : Epoch)
+theorem State.pendingCount_install_add (state : State) (leafIndex : LeafIndex)
     (digest : Digest) :
-    (state.install epoch digest).pendingCount + (state.pending epoch).card =
+    (state.install leafIndex digest).pendingCount + (state.pending leafIndex).card =
       state.pendingCount := by
   classical
   unfold pendingCount install
   change (∑ candidate,
-      (Function.update state.pending epoch ∅ candidate).card) +
-        (state.pending epoch).card = _
+      (Function.update state.pending leafIndex ∅ candidate).card) +
+        (state.pending leafIndex).card = _
   have hupdate :
       (fun candidate =>
-        (Function.update state.pending epoch ∅ candidate).card) =
-        Function.update (fun candidate => (state.pending candidate).card) epoch 0 := by
+        (Function.update state.pending leafIndex ∅ candidate).card) =
+        Function.update (fun candidate => (state.pending candidate).card) leafIndex 0 := by
     funext candidate
-    by_cases heq : candidate = epoch <;> simp [heq]
+    by_cases heq : candidate = leafIndex <;> simp [heq]
   rw [hupdate]
-  rw [Finset.sum_update_of_mem (Finset.mem_univ epoch)]
+  rw [Finset.sum_update_of_mem (Finset.mem_univ leafIndex)]
   rw [zero_add, Finset.sdiff_singleton_eq_erase]
   exact Finset.sum_erase_add Finset.univ
-    (fun candidate => (state.pending candidate).card) (Finset.mem_univ epoch)
+    (fun candidate => (state.pending candidate).card) (Finset.mem_univ leafIndex)
 
-theorem State.pendingCount_install_eq (state : State) (epoch : Epoch)
+theorem State.pendingCount_install_eq (state : State) (leafIndex : LeafIndex)
     (left right : Digest) :
-    (state.install epoch left).pendingCount =
-      (state.install epoch right).pendingCount := by
+    (state.install leafIndex left).pendingCount =
+      (state.install leafIndex right).pendingCount := by
   rfl
 
 def State.empty : State :=
@@ -94,39 +94,39 @@ theorem State.pendingCount_empty : State.empty.pendingCount = 0 := by
 attribute [irreducible] State.pendingCount
 
 inductive ObservedAction where
-  | query (epoch : Epoch) (output : HashOutput)
-  | sign (epoch : Epoch) (output : HashOutput)
+  | query (leafIndex : LeafIndex) (output : HashOutput)
+  | sign (leafIndex : LeafIndex) (output : HashOutput)
 
-def ObservedAction.IsSignAt (target : Epoch) : ObservedAction → Prop
+def ObservedAction.IsSignAt (target : LeafIndex) : ObservedAction → Prop
   | .query _ _ => False
-  | .sign epoch _ => epoch = target
+  | .sign leafIndex _ => leafIndex = target
 
-def observedSignEpochs : List ObservedAction → List Epoch
+def observedSignLeafIndices : List ObservedAction → List LeafIndex
   | [] => []
-  | .query _ _ :: actions => observedSignEpochs actions
-  | .sign epoch _ :: actions => epoch :: observedSignEpochs actions
+  | .query _ _ :: actions => observedSignLeafIndices actions
+  | .sign leafIndex _ :: actions => leafIndex :: observedSignLeafIndices actions
 
 @[simp]
-theorem observedSignEpochs_append (left right : List ObservedAction) :
-    observedSignEpochs (left ++ right) =
-      observedSignEpochs left ++ observedSignEpochs right := by
+theorem observedSignLeafIndices_append (left right : List ObservedAction) :
+    observedSignLeafIndices (left ++ right) =
+      observedSignLeafIndices left ++ observedSignLeafIndices right := by
   induction left with
   | nil => rfl
   | cons action left ih =>
-      cases action <;> simp [observedSignEpochs, ih]
+      cases action <;> simp [observedSignLeafIndices, ih]
 
 def State.applyObserved (state : State) : ObservedAction → Option (State × Bool)
-  | .query epoch output =>
+  | .query leafIndex output =>
       let digest := truncateHash output
-      match state.signed epoch with
+      match state.signed leafIndex with
       | some target => some (state, digest = target)
-      | none => some (state.addPending epoch digest, false)
-  | .sign epoch output =>
-      match state.signed epoch with
+      | none => some (state.addPending leafIndex digest, false)
+  | .sign leafIndex output =>
+      match state.signed leafIndex with
       | some _ => none
       | none =>
           let digest := truncateHash output
-          some (state.install epoch digest, digest ∈ state.pending epoch)
+          some (state.install leafIndex digest, digest ∈ state.pending leafIndex)
 
 def runObserved : State → List ObservedAction → Bool
   | _state, [] => false
@@ -149,17 +149,17 @@ structure ReplayResult where
   valid : Bool
 
 def State.applyObservedTotal (state : State) : ObservedAction → ReplayResult
-  | .query epoch output =>
+  | .query leafIndex output =>
       let digest := truncateHash output
-      match state.signed epoch with
+      match state.signed leafIndex with
       | some target => ⟨state, digest = target, true⟩
-      | none => ⟨state.addPending epoch digest, false, true⟩
-  | .sign epoch output =>
-      match state.signed epoch with
+      | none => ⟨state.addPending leafIndex digest, false, true⟩
+  | .sign leafIndex output =>
+      match state.signed leafIndex with
       | some _ => ⟨state, false, false⟩
       | none =>
           let digest := truncateHash output
-          ⟨state.install epoch digest, digest ∈ state.pending epoch, true⟩
+          ⟨state.install leafIndex digest, digest ∈ state.pending leafIndex, true⟩
 
 def replayObserved : State → List ObservedAction → ReplayResult
   | state, [] => ⟨state, false, true⟩
@@ -178,47 +178,47 @@ theorem replayObserved_cons (state : State) (action : ObservedAction)
 
 theorem replayObserved_valid_iff (state : State) (actions : List ObservedAction) :
     (replayObserved state actions).valid = true ↔
-      (∀ epoch ∈ observedSignEpochs actions, state.signed epoch = none) ∧
-        (observedSignEpochs actions).Nodup := by
+      (∀ leafIndex ∈ observedSignLeafIndices actions, state.signed leafIndex = none) ∧
+        (observedSignLeafIndices actions).Nodup := by
   induction actions generalizing state with
-  | nil => simp [replayObserved, observedSignEpochs]
+  | nil => simp [replayObserved, observedSignLeafIndices]
   | cons action actions ih =>
       cases action with
-      | query epoch output =>
-          cases hsigned : state.signed epoch <;>
-            simp [replayObserved, State.applyObservedTotal, observedSignEpochs,
+      | query leafIndex output =>
+          cases hsigned : state.signed leafIndex <;>
+            simp [replayObserved, State.applyObservedTotal, observedSignLeafIndices,
               hsigned, ih, State.addPending]
-      | sign epoch output =>
-          cases hsigned : state.signed epoch with
+      | sign leafIndex output =>
+          cases hsigned : state.signed leafIndex with
           | none =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned, Bool.true_and, ih,
-                observedSignEpochs, List.mem_cons, forall_eq_or_imp, List.nodup_cons]
+                observedSignLeafIndices, List.mem_cons, forall_eq_or_imp, List.nodup_cons]
               have htail :
-                  (∀ candidate ∈ observedSignEpochs actions,
-                      (state.install epoch (truncateHash output)).signed candidate = none) ↔
-                    epoch ∉ observedSignEpochs actions ∧
-                      ∀ candidate ∈ observedSignEpochs actions,
+                  (∀ candidate ∈ observedSignLeafIndices actions,
+                      (state.install leafIndex (truncateHash output)).signed candidate = none) ↔
+                    leafIndex ∉ observedSignLeafIndices actions ∧
+                      ∀ candidate ∈ observedSignLeafIndices actions,
                         state.signed candidate = none := by
                 constructor
                 · intro hall
                   constructor
-                  · intro hepoch
-                    have := hall epoch hepoch
+                  · intro hleafIndex
+                    have := hall leafIndex hleafIndex
                     simp [State.install] at this
                   · intro candidate hcandidate
                     have hnone := hall candidate hcandidate
-                    have hne : candidate ≠ epoch := by
+                    have hne : candidate ≠ leafIndex := by
                       intro heq
                       subst candidate
-                      have := hall epoch hcandidate
+                      have := hall leafIndex hcandidate
                       simp [State.install] at this
                     simpa [State.install, hne] using hnone
-                · rintro ⟨hepoch, hall⟩ candidate hcandidate
-                  have hne : candidate ≠ epoch := by
+                · rintro ⟨hleafIndex, hall⟩ candidate hcandidate
+                  have hne : candidate ≠ leafIndex := by
                     intro heq
                     subst candidate
-                    exact hepoch hcandidate
+                    exact hleafIndex hcandidate
                   simpa [State.install, hne] using
                     hall candidate hcandidate
               rw [htail]
@@ -226,14 +226,14 @@ theorem replayObserved_valid_iff (state : State) (actions : List ObservedAction)
           | some target =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned, Bool.false_and,
-                Bool.false_eq_true, false_iff, observedSignEpochs, List.mem_cons,
+                Bool.false_eq_true, false_iff, observedSignLeafIndices, List.mem_cons,
                 forall_eq_or_imp]
               simp
 
 @[simp]
 theorem replayObserved_empty_valid_iff (actions : List ObservedAction) :
     (replayObserved State.empty actions).valid = true ↔
-      (observedSignEpochs actions).Nodup := by
+      (observedSignLeafIndices actions).Nodup := by
   rw [replayObserved_valid_iff]
   simp [State.empty]
 
@@ -245,14 +245,14 @@ theorem runObserved_eq_replayObserved_hit_of_valid
   | nil => rfl
   | cons action actions ih =>
       cases action with
-      | query epoch output =>
-          cases hsigned : state.signed epoch <;>
+      | query leafIndex output =>
+          cases hsigned : state.signed leafIndex <;>
             simp only [runObserved, State.applyObserved, hsigned, replayObserved,
               State.applyObservedTotal, Bool.true_and] at hvalid ⊢
           · rw [ih _ hvalid]
           · rw [ih _ hvalid]
-      | sign epoch output =>
-          cases hsigned : state.signed epoch with
+      | sign leafIndex output =>
+          cases hsigned : state.signed leafIndex with
           | none =>
               simp only [runObserved, State.applyObserved, hsigned, replayObserved,
                 State.applyObservedTotal, Bool.true_and] at hvalid ⊢
@@ -275,17 +275,17 @@ theorem replayObserved_append (state : State)
       simp [Bool.or_assoc, Bool.and_assoc]
 
 theorem replayObserved_state_signed_eq_of_not_mem
-    (state : State) (actions : List ObservedAction) (epoch : Epoch)
-    (hnot : epoch ∉ observedSignEpochs actions) :
-    (replayObserved state actions).state.signed epoch = state.signed epoch := by
+    (state : State) (actions : List ObservedAction) (leafIndex : LeafIndex)
+    (hnot : leafIndex ∉ observedSignLeafIndices actions) :
+    (replayObserved state actions).state.signed leafIndex = state.signed leafIndex := by
   induction actions generalizing state with
   | nil => rfl
   | cons action actions ih =>
       cases action with
-      | query queriedEpoch output =>
-          have htail : epoch ∉ observedSignEpochs actions := by
-            simpa [observedSignEpochs] using hnot
-          cases hsigned : state.signed queriedEpoch with
+      | query queriedLeafIndex output =>
+          have htail : leafIndex ∉ observedSignLeafIndices actions := by
+            simpa [observedSignLeafIndices] using hnot
+          cases hsigned : state.signed queriedLeafIndex with
           | some target =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
@@ -293,21 +293,21 @@ theorem replayObserved_state_signed_eq_of_not_mem
           | none =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
-              exact (ih (state.addPending queriedEpoch (truncateHash output)) htail).trans
+              exact (ih (state.addPending queriedLeafIndex (truncateHash output)) htail).trans
                 (by rfl)
-      | sign signedEpoch output =>
-          have hsignedNe : signedEpoch ≠ epoch := by
+      | sign signedLeafIndex output =>
+          have hsignedNe : signedLeafIndex ≠ leafIndex := by
             intro heq
-            subst signedEpoch
-            exact hnot (by simp [observedSignEpochs])
-          have htail : epoch ∉ observedSignEpochs actions := by
+            subst signedLeafIndex
+            exact hnot (by simp [observedSignLeafIndices])
+          have htail : leafIndex ∉ observedSignLeafIndices actions := by
             intro hmem
-            exact hnot (by simp [observedSignEpochs, hmem])
-          cases hsigned : state.signed signedEpoch with
+            exact hnot (by simp [observedSignLeafIndices, hmem])
+          cases hsigned : state.signed signedLeafIndex with
           | none =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
-              rw [ih (state.install signedEpoch (truncateHash output)) htail]
+              rw [ih (state.install signedLeafIndex (truncateHash output)) htail]
               simp [State.install, Ne.symm hsignedNe]
           | some target =>
               rw [replayObserved_cons]
@@ -315,17 +315,17 @@ theorem replayObserved_state_signed_eq_of_not_mem
               exact ih state htail
 
 theorem replayObserved_pending_mono_of_not_mem
-    (state : State) (actions : List ObservedAction) (epoch : Epoch)
-    (hnot : epoch ∉ observedSignEpochs actions) :
-    state.pending epoch ⊆ (replayObserved state actions).state.pending epoch := by
+    (state : State) (actions : List ObservedAction) (leafIndex : LeafIndex)
+    (hnot : leafIndex ∉ observedSignLeafIndices actions) :
+    state.pending leafIndex ⊆ (replayObserved state actions).state.pending leafIndex := by
   induction actions generalizing state with
   | nil => exact fun _ hmem => hmem
   | cons action actions ih =>
       cases action with
-      | query queriedEpoch output =>
-          have htail : epoch ∉ observedSignEpochs actions := by
-            simpa [observedSignEpochs] using hnot
-          cases hsigned : state.signed queriedEpoch with
+      | query queriedLeafIndex output =>
+          have htail : leafIndex ∉ observedSignLeafIndices actions := by
+            simpa [observedSignLeafIndices] using hnot
+          cases hsigned : state.signed queriedLeafIndex with
           | some target =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
@@ -333,21 +333,21 @@ theorem replayObserved_pending_mono_of_not_mem
           | none =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
-              refine fun digest hdigest => ih (state.addPending queriedEpoch
+              refine fun digest hdigest => ih (state.addPending queriedLeafIndex
                 (truncateHash output)) htail ?_
-              by_cases heq : queriedEpoch = epoch
-              · subst queriedEpoch
+              by_cases heq : queriedLeafIndex = leafIndex
+              · subst queriedLeafIndex
                 simpa [State.addPending] using Finset.mem_insert_of_mem hdigest
               · simpa [State.addPending, Ne.symm heq] using hdigest
-      | sign signedEpoch output =>
-          have hsignedNe : signedEpoch ≠ epoch := by
+      | sign signedLeafIndex output =>
+          have hsignedNe : signedLeafIndex ≠ leafIndex := by
             intro heq
-            subst signedEpoch
-            exact hnot (by simp [observedSignEpochs])
-          have htail : epoch ∉ observedSignEpochs actions := by
+            subst signedLeafIndex
+            exact hnot (by simp [observedSignLeafIndices])
+          have htail : leafIndex ∉ observedSignLeafIndices actions := by
             intro hmem
-            exact hnot (by simp [observedSignEpochs, hmem])
-          cases hsigned : state.signed signedEpoch with
+            exact hnot (by simp [observedSignLeafIndices, hmem])
+          cases hsigned : state.signed signedLeafIndex with
           | some target =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
@@ -355,90 +355,90 @@ theorem replayObserved_pending_mono_of_not_mem
           | none =>
               rw [replayObserved_cons]
               simp only [State.applyObservedTotal, hsigned]
-              refine fun digest hdigest => ih (state.install signedEpoch
+              refine fun digest hdigest => ih (state.install signedLeafIndex
                 (truncateHash output)) htail ?_
               simpa [State.install, Ne.symm hsignedNe] using hdigest
 
 theorem replayObserved_hit_of_query_before_sign
-    (state : State) (epoch : Epoch) (queriedOutput signedOutput : HashOutput)
+    (state : State) (leafIndex : LeafIndex) (queriedOutput signedOutput : HashOutput)
     (middle after : List ObservedAction)
-    (hsigned : state.signed epoch = none)
-    (hnoMiddleSign : epoch ∉ observedSignEpochs middle)
+    (hsigned : state.signed leafIndex = none)
+    (hnoMiddleSign : leafIndex ∉ observedSignLeafIndices middle)
     (hcollision : truncateHash queriedOutput = truncateHash signedOutput) :
     (replayObserved state
-      (.query epoch queriedOutput :: middle ++ .sign epoch signedOutput :: after)).hit =
+      (.query leafIndex queriedOutput :: middle ++ .sign leafIndex signedOutput :: after)).hit =
         true := by
   simp only [List.cons_append]
   rw [congrArg ReplayResult.hit (replayObserved_cons state
-    (.query epoch queriedOutput) (middle ++ .sign epoch signedOutput :: after))]
+    (.query leafIndex queriedOutput) (middle ++ .sign leafIndex signedOutput :: after))]
   simp only [State.applyObservedTotal, hsigned, Bool.false_or]
   rw [replayObserved_append]
   let middleResult := replayObserved
-    (state.addPending epoch (truncateHash queriedOutput)) middle
-  have hmiddleSigned : middleResult.state.signed epoch = none := by
+    (state.addPending leafIndex (truncateHash queriedOutput)) middle
+  have hmiddleSigned : middleResult.state.signed leafIndex = none := by
     calc
-      middleResult.state.signed epoch =
-          (state.addPending epoch (truncateHash queriedOutput)).signed epoch :=
-        replayObserved_state_signed_eq_of_not_mem _ middle epoch hnoMiddleSign
+      middleResult.state.signed leafIndex =
+          (state.addPending leafIndex (truncateHash queriedOutput)).signed leafIndex :=
+        replayObserved_state_signed_eq_of_not_mem _ middle leafIndex hnoMiddleSign
       _ = none := hsigned
   have hinitialPending : truncateHash queriedOutput ∈
-      (state.addPending epoch (truncateHash queriedOutput)).pending epoch := by
+      (state.addPending leafIndex (truncateHash queriedOutput)).pending leafIndex := by
     simp [State.addPending]
-  have hmiddlePending : truncateHash signedOutput ∈ middleResult.state.pending epoch := by
+  have hmiddlePending : truncateHash signedOutput ∈ middleResult.state.pending leafIndex := by
     rw [← hcollision]
-    exact replayObserved_pending_mono_of_not_mem _ middle epoch hnoMiddleSign
+    exact replayObserved_pending_mono_of_not_mem _ middle leafIndex hnoMiddleSign
       hinitialPending
   change (middleResult.hit ||
-    (replayObserved middleResult.state (.sign epoch signedOutput :: after)).hit) = true
+    (replayObserved middleResult.state (.sign leafIndex signedOutput :: after)).hit) = true
   rw [congrArg ReplayResult.hit (replayObserved_cons middleResult.state
-    (.sign epoch signedOutput) after)]
+    (.sign leafIndex signedOutput) after)]
   simp [State.applyObservedTotal, hmiddleSigned, hmiddlePending]
 
 theorem replayObserved_hit_of_sign_before_query
-    (state : State) (epoch : Epoch) (signedOutput queriedOutput : HashOutput)
+    (state : State) (leafIndex : LeafIndex) (signedOutput queriedOutput : HashOutput)
     (middle after : List ObservedAction)
-    (hsigned : state.signed epoch = none)
-    (hnoMiddleSign : epoch ∉ observedSignEpochs middle)
+    (hsigned : state.signed leafIndex = none)
+    (hnoMiddleSign : leafIndex ∉ observedSignLeafIndices middle)
     (hcollision : truncateHash signedOutput = truncateHash queriedOutput) :
     (replayObserved state
-      (.sign epoch signedOutput :: middle ++ .query epoch queriedOutput :: after)).hit =
+      (.sign leafIndex signedOutput :: middle ++ .query leafIndex queriedOutput :: after)).hit =
         true := by
   simp only [List.cons_append]
   rw [congrArg ReplayResult.hit (replayObserved_cons state
-    (.sign epoch signedOutput) (middle ++ .query epoch queriedOutput :: after))]
+    (.sign leafIndex signedOutput) (middle ++ .query leafIndex queriedOutput :: after))]
   simp only [State.applyObservedTotal, hsigned]
   rw [replayObserved_append]
   let middleResult := replayObserved
-    (state.install epoch (truncateHash signedOutput)) middle
-  have hmiddleSigned : middleResult.state.signed epoch =
+    (state.install leafIndex (truncateHash signedOutput)) middle
+  have hmiddleSigned : middleResult.state.signed leafIndex =
       some (truncateHash signedOutput) := by
     calc
-      middleResult.state.signed epoch =
-          (state.install epoch (truncateHash signedOutput)).signed epoch :=
-        replayObserved_state_signed_eq_of_not_mem _ middle epoch hnoMiddleSign
+      middleResult.state.signed leafIndex =
+          (state.install leafIndex (truncateHash signedOutput)).signed leafIndex :=
+        replayObserved_state_signed_eq_of_not_mem _ middle leafIndex hnoMiddleSign
       _ = some (truncateHash signedOutput) := by simp [State.install]
-  change (decide (truncateHash signedOutput ∈ state.pending epoch) ||
+  change (decide (truncateHash signedOutput ∈ state.pending leafIndex) ||
     (middleResult.hit ||
-      (replayObserved middleResult.state (.query epoch queriedOutput :: after)).hit)) = true
+      (replayObserved middleResult.state (.query leafIndex queriedOutput :: after)).hit)) = true
   rw [congrArg ReplayResult.hit (replayObserved_cons middleResult.state
-    (.query epoch queriedOutput) after)]
+    (.query leafIndex queriedOutput) after)]
   simp [State.applyObservedTotal, hmiddleSigned, hcollision]
 
 theorem runObserved_empty_eq_true_of_query_before_sign
-    (epoch : Epoch) (queriedOutput signedOutput : HashOutput)
+    (leafIndex : LeafIndex) (queriedOutput signedOutput : HashOutput)
     (before middle after : List ObservedAction)
-    (hnoBeforeSign : epoch ∉ observedSignEpochs before)
-    (hnoMiddleSign : epoch ∉ observedSignEpochs middle)
+    (hnoBeforeSign : leafIndex ∉ observedSignLeafIndices before)
+    (hnoMiddleSign : leafIndex ∉ observedSignLeafIndices middle)
     (hcollision : truncateHash queriedOutput = truncateHash signedOutput)
-    (hvalid : (observedSignEpochs
-      (before ++ [.query epoch queriedOutput] ++ middle ++
-        [.sign epoch signedOutput] ++ after)).Nodup) :
+    (hvalid : (observedSignLeafIndices
+      (before ++ [.query leafIndex queriedOutput] ++ middle ++
+        [.sign leafIndex signedOutput] ++ after)).Nodup) :
     runObserved State.empty
-      (before ++ [.query epoch queriedOutput] ++ middle ++
-        [.sign epoch signedOutput] ++ after) = true := by
-  let tail := .query epoch queriedOutput :: middle ++ .sign epoch signedOutput :: after
-  have hlist : before ++ [.query epoch queriedOutput] ++ middle ++
-      [.sign epoch signedOutput] ++ after = before ++ tail := by
+      (before ++ [.query leafIndex queriedOutput] ++ middle ++
+        [.sign leafIndex signedOutput] ++ after) = true := by
+  let tail := .query leafIndex queriedOutput :: middle ++ .sign leafIndex signedOutput :: after
+  have hlist : before ++ [.query leafIndex queriedOutput] ++ middle ++
+      [.sign leafIndex signedOutput] ++ after = before ++ tail := by
     simp [tail, List.append_assoc]
   rw [hlist]
   have hreplayValid : (replayObserved State.empty (before ++ tail)).valid = true :=
@@ -446,32 +446,32 @@ theorem runObserved_empty_eq_true_of_query_before_sign
   rw [runObserved_eq_replayObserved_hit_of_valid _ _ hreplayValid]
   rw [replayObserved_append]
   let beforeResult := replayObserved State.empty before
-  have hbeforeSigned : beforeResult.state.signed epoch = none := by
+  have hbeforeSigned : beforeResult.state.signed leafIndex = none := by
     calc
-      beforeResult.state.signed epoch = State.empty.signed epoch :=
-        replayObserved_state_signed_eq_of_not_mem State.empty before epoch hnoBeforeSign
+      beforeResult.state.signed leafIndex = State.empty.signed leafIndex :=
+        replayObserved_state_signed_eq_of_not_mem State.empty before leafIndex hnoBeforeSign
       _ = none := rfl
   have htailHit : (replayObserved beforeResult.state tail).hit = true := by
-    exact replayObserved_hit_of_query_before_sign beforeResult.state epoch queriedOutput
+    exact replayObserved_hit_of_query_before_sign beforeResult.state leafIndex queriedOutput
       signedOutput middle after hbeforeSigned hnoMiddleSign hcollision
   change (beforeResult.hit || (replayObserved beforeResult.state tail).hit) = true
   simp [htailHit]
 
 theorem runObserved_empty_eq_true_of_sign_before_query
-    (epoch : Epoch) (signedOutput queriedOutput : HashOutput)
+    (leafIndex : LeafIndex) (signedOutput queriedOutput : HashOutput)
     (before middle after : List ObservedAction)
-    (hnoBeforeSign : epoch ∉ observedSignEpochs before)
-    (hnoMiddleSign : epoch ∉ observedSignEpochs middle)
+    (hnoBeforeSign : leafIndex ∉ observedSignLeafIndices before)
+    (hnoMiddleSign : leafIndex ∉ observedSignLeafIndices middle)
     (hcollision : truncateHash signedOutput = truncateHash queriedOutput)
-    (hvalid : (observedSignEpochs
-      (before ++ [.sign epoch signedOutput] ++ middle ++
-        [.query epoch queriedOutput] ++ after)).Nodup) :
+    (hvalid : (observedSignLeafIndices
+      (before ++ [.sign leafIndex signedOutput] ++ middle ++
+        [.query leafIndex queriedOutput] ++ after)).Nodup) :
     runObserved State.empty
-      (before ++ [.sign epoch signedOutput] ++ middle ++
-        [.query epoch queriedOutput] ++ after) = true := by
-  let tail := .sign epoch signedOutput :: middle ++ .query epoch queriedOutput :: after
-  have hlist : before ++ [.sign epoch signedOutput] ++ middle ++
-      [.query epoch queriedOutput] ++ after = before ++ tail := by
+      (before ++ [.sign leafIndex signedOutput] ++ middle ++
+        [.query leafIndex queriedOutput] ++ after) = true := by
+  let tail := .sign leafIndex signedOutput :: middle ++ .query leafIndex queriedOutput :: after
+  have hlist : before ++ [.sign leafIndex signedOutput] ++ middle ++
+      [.query leafIndex queriedOutput] ++ after = before ++ tail := by
     simp [tail, List.append_assoc]
   rw [hlist]
   have hreplayValid : (replayObserved State.empty (before ++ tail)).valid = true :=
@@ -479,78 +479,78 @@ theorem runObserved_empty_eq_true_of_sign_before_query
   rw [runObserved_eq_replayObserved_hit_of_valid _ _ hreplayValid]
   rw [replayObserved_append]
   let beforeResult := replayObserved State.empty before
-  have hbeforeSigned : beforeResult.state.signed epoch = none := by
+  have hbeforeSigned : beforeResult.state.signed leafIndex = none := by
     calc
-      beforeResult.state.signed epoch = State.empty.signed epoch :=
-        replayObserved_state_signed_eq_of_not_mem State.empty before epoch hnoBeforeSign
+      beforeResult.state.signed leafIndex = State.empty.signed leafIndex :=
+        replayObserved_state_signed_eq_of_not_mem State.empty before leafIndex hnoBeforeSign
       _ = none := rfl
   have htailHit : (replayObserved beforeResult.state tail).hit = true := by
-    exact replayObserved_hit_of_sign_before_query beforeResult.state epoch signedOutput
+    exact replayObserved_hit_of_sign_before_query beforeResult.state leafIndex signedOutput
       queriedOutput middle after hbeforeSigned hnoMiddleSign hcollision
   change (beforeResult.hit || (replayObserved beforeResult.state tail).hit) = true
   simp [htailHit]
 
-theorem observedSignEpochs_not_mem_around_sign
-    (epoch : Epoch) (output : HashOutput)
+theorem observedSignLeafIndices_not_mem_around_sign
+    (leafIndex : LeafIndex) (output : HashOutput)
     (before after : List ObservedAction)
-    (hvalid : (observedSignEpochs
-      (before ++ [.sign epoch output] ++ after)).Nodup) :
-    epoch ∉ observedSignEpochs before ∧ epoch ∉ observedSignEpochs after := by
+    (hvalid : (observedSignLeafIndices
+      (before ++ [.sign leafIndex output] ++ after)).Nodup) :
+    leafIndex ∉ observedSignLeafIndices before ∧ leafIndex ∉ observedSignLeafIndices after := by
   have hnormalized :
-      (observedSignEpochs before ++ epoch :: observedSignEpochs after).Nodup := by
-    simpa [observedSignEpochs, List.append_assoc] using hvalid
+      (observedSignLeafIndices before ++ leafIndex :: observedSignLeafIndices after).Nodup := by
+    simpa [observedSignLeafIndices, List.append_assoc] using hvalid
   have hparts := List.nodup_append.mp hnormalized
   constructor
   · intro hmem
-    exact hparts.2.2 epoch hmem epoch (by simp) rfl
+    exact hparts.2.2 leafIndex hmem leafIndex (by simp) rfl
   · exact (List.nodup_cons.mp hparts.2.1).1
 
 theorem runObserved_empty_eq_true_of_query_before_sign_of_nodup
-    (epoch : Epoch) (queriedOutput signedOutput : HashOutput)
+    (leafIndex : LeafIndex) (queriedOutput signedOutput : HashOutput)
     (before middle after : List ObservedAction)
     (hcollision : truncateHash queriedOutput = truncateHash signedOutput)
-    (hvalid : (observedSignEpochs
-      (before ++ [.query epoch queriedOutput] ++ middle ++
-        [.sign epoch signedOutput] ++ after)).Nodup) :
+    (hvalid : (observedSignLeafIndices
+      (before ++ [.query leafIndex queriedOutput] ++ middle ++
+        [.sign leafIndex signedOutput] ++ after)).Nodup) :
     runObserved State.empty
-      (before ++ [.query epoch queriedOutput] ++ middle ++
-        [.sign epoch signedOutput] ++ after) = true := by
-  have haround := observedSignEpochs_not_mem_around_sign epoch signedOutput
-    (before ++ [.query epoch queriedOutput] ++ middle) after (by
+      (before ++ [.query leafIndex queriedOutput] ++ middle ++
+        [.sign leafIndex signedOutput] ++ after) = true := by
+  have haround := observedSignLeafIndices_not_mem_around_sign leafIndex signedOutput
+    (before ++ [.query leafIndex queriedOutput] ++ middle) after (by
       simpa [List.append_assoc] using hvalid)
-  have hnoPrefix : epoch ∉ observedSignEpochs before := by
+  have hnoPrefix : leafIndex ∉ observedSignLeafIndices before := by
     intro hmem
     apply haround.1
     simp [hmem]
-  have hnoMiddle : epoch ∉ observedSignEpochs middle := by
+  have hnoMiddle : leafIndex ∉ observedSignLeafIndices middle := by
     intro hmem
     apply haround.1
-    have : epoch ∈ observedSignEpochs before ++ observedSignEpochs middle :=
+    have : leafIndex ∈ observedSignLeafIndices before ++ observedSignLeafIndices middle :=
       List.mem_append_right _ hmem
-    simpa [observedSignEpochs, List.append_assoc] using this
-  exact runObserved_empty_eq_true_of_query_before_sign epoch queriedOutput
+    simpa [observedSignLeafIndices, List.append_assoc] using this
+  exact runObserved_empty_eq_true_of_query_before_sign leafIndex queriedOutput
     signedOutput before middle after hnoPrefix hnoMiddle hcollision hvalid
 
 theorem runObserved_empty_eq_true_of_sign_before_query_of_nodup
-    (epoch : Epoch) (signedOutput queriedOutput : HashOutput)
+    (leafIndex : LeafIndex) (signedOutput queriedOutput : HashOutput)
     (before middle after : List ObservedAction)
     (hcollision : truncateHash signedOutput = truncateHash queriedOutput)
-    (hvalid : (observedSignEpochs
-      (before ++ [.sign epoch signedOutput] ++ middle ++
-        [.query epoch queriedOutput] ++ after)).Nodup) :
+    (hvalid : (observedSignLeafIndices
+      (before ++ [.sign leafIndex signedOutput] ++ middle ++
+        [.query leafIndex queriedOutput] ++ after)).Nodup) :
     runObserved State.empty
-      (before ++ [.sign epoch signedOutput] ++ middle ++
-        [.query epoch queriedOutput] ++ after) = true := by
-  have haround := observedSignEpochs_not_mem_around_sign epoch signedOutput before
-    (middle ++ [.query epoch queriedOutput] ++ after) (by
+      (before ++ [.sign leafIndex signedOutput] ++ middle ++
+        [.query leafIndex queriedOutput] ++ after) = true := by
+  have haround := observedSignLeafIndices_not_mem_around_sign leafIndex signedOutput before
+    (middle ++ [.query leafIndex queriedOutput] ++ after) (by
       simpa [List.append_assoc] using hvalid)
-  have hnoMiddle : epoch ∉ observedSignEpochs middle := by
+  have hnoMiddle : leafIndex ∉ observedSignLeafIndices middle := by
     intro hmem
     apply haround.2
-    have : epoch ∈ observedSignEpochs middle ++ observedSignEpochs after :=
+    have : leafIndex ∈ observedSignLeafIndices middle ++ observedSignLeafIndices after :=
       List.mem_append_left _ hmem
-    simpa [observedSignEpochs, List.append_assoc] using this
-  exact runObserved_empty_eq_true_of_sign_before_query epoch signedOutput
+    simpa [observedSignLeafIndices, List.append_assoc] using this
+  exact runObserved_empty_eq_true_of_sign_before_query leafIndex signedOutput
     queriedOutput before middle after haround.1 hnoMiddle hcollision hvalid
 
 theorem pair_sublist_iff (first second : α) (actions : List α) :
@@ -579,44 +579,44 @@ theorem pair_sublist_iff (first second : α) (actions : List α) :
       List.sublist_append_right before _
     exact (hsecond.cons_cons first).trans hprefix
 
-theorem observedSignEpochs_sublist {left right : List ObservedAction}
+theorem observedSignLeafIndices_sublist {left right : List ObservedAction}
     (hsub : List.Sublist left right) :
-    List.Sublist (observedSignEpochs left) (observedSignEpochs right) := by
+    List.Sublist (observedSignLeafIndices left) (observedSignLeafIndices right) := by
   induction hsub with
   | slnil => exact .slnil
   | cons action hsub ih =>
       cases action with
-      | query epoch output => exact ih
-      | sign epoch output => exact ih.cons epoch
+      | query leafIndex output => exact ih
+      | sign leafIndex output => exact ih.cons leafIndex
   | cons_cons action hsub ih =>
       cases action with
-      | query epoch output => exact ih
-      | sign epoch output => exact ih.cons_cons epoch
+      | query leafIndex output => exact ih
+      | sign leafIndex output => exact ih.cons_cons leafIndex
 
 def HasCollisionPair (actions : List ObservedAction) : Prop :=
-  ∃ epoch queriedOutput signedOutput,
+  ∃ leafIndex queriedOutput signedOutput,
     truncateHash queriedOutput = truncateHash signedOutput ∧
-      (List.Sublist [.query epoch queriedOutput, .sign epoch signedOutput] actions ∨
-        List.Sublist [.sign epoch signedOutput, .query epoch queriedOutput] actions)
+      (List.Sublist [.query leafIndex queriedOutput, .sign leafIndex signedOutput] actions ∨
+        List.Sublist [.sign leafIndex signedOutput, .query leafIndex queriedOutput] actions)
 
 theorem HasCollisionPair.mono {left right : List ObservedAction}
     (hcollision : HasCollisionPair left) (hsub : List.Sublist left right) :
     HasCollisionPair right := by
-  obtain ⟨epoch, queriedOutput, signedOutput, hdigest, hpair⟩ := hcollision
-  exact ⟨epoch, queriedOutput, signedOutput, hdigest,
+  obtain ⟨leafIndex, queriedOutput, signedOutput, hdigest, hpair⟩ := hcollision
+  exact ⟨leafIndex, queriedOutput, signedOutput, hdigest,
     hpair.imp (·.trans hsub) (·.trans hsub)⟩
 
 def StateRepresentedBy (state : State) (actions : List ObservedAction) : Prop :=
-  (∀ epoch digest, state.signed epoch = some digest →
-      ∃ output, .sign epoch output ∈ actions ∧ truncateHash output = digest) ∧
-    (∀ epoch digest, digest ∈ state.pending epoch →
-      ∃ output, .query epoch output ∈ actions ∧ truncateHash output = digest)
+  (∀ leafIndex digest, state.signed leafIndex = some digest →
+      ∃ output, .sign leafIndex output ∈ actions ∧ truncateHash output = digest) ∧
+    (∀ leafIndex digest, digest ∈ state.pending leafIndex →
+      ∃ output, .query leafIndex output ∈ actions ∧ truncateHash output = digest)
 
 theorem StateRepresentedBy.empty : StateRepresentedBy State.empty [] := by
   constructor
-  · intro epoch digest hsigned
+  · intro leafIndex digest hsigned
     simp [State.empty] at hsigned
-  · intro epoch digest hpending
+  · intro leafIndex digest hpending
     simp [State.empty] at hpending
 
 theorem StateRepresentedBy.applyObservedTotal
@@ -627,8 +627,8 @@ theorem StateRepresentedBy.applyObservedTotal
       (actions ++ [action]) := by
   rcases hrepresented with ⟨hsignedRep, hpendingRep⟩
   cases action with
-  | query epoch output =>
-      cases hsigned : state.signed epoch with
+  | query leafIndex output =>
+      cases hsigned : state.signed leafIndex with
       | some target =>
           simp only [State.applyObservedTotal, hsigned]
           constructor
@@ -648,7 +648,7 @@ theorem StateRepresentedBy.applyObservedTotal
               hsignedRep candidate digest hcandid
             exact ⟨oldOutput, List.mem_append_left _ hold, hdigest⟩
           · intro candidate digest hcandid
-            by_cases heq : candidate = epoch
+            by_cases heq : candidate = leafIndex
             · subst candidate
               simp only [State.addPending, Function.update_self,
                 Finset.mem_insert] at hcandid
@@ -656,15 +656,15 @@ theorem StateRepresentedBy.applyObservedTotal
               · subst digest
                 exact ⟨output, by simp, rfl⟩
               · obtain ⟨oldOutput, hold, hdigest⟩ :=
-                  hpendingRep epoch digest hcandid
+                  hpendingRep leafIndex digest hcandid
                 exact ⟨oldOutput, List.mem_append_left _ hold, hdigest⟩
             · have hold : digest ∈ state.pending candidate := by
                 simpa [State.addPending, heq] using hcandid
               obtain ⟨oldOutput, hmem, hdigest⟩ :=
                 hpendingRep candidate digest hold
               exact ⟨oldOutput, List.mem_append_left _ hmem, hdigest⟩
-  | sign epoch output =>
-      cases hsigned : state.signed epoch with
+  | sign leafIndex output =>
+      cases hsigned : state.signed leafIndex with
       | some target =>
           simp only [State.applyObservedTotal, hsigned]
           constructor
@@ -680,7 +680,7 @@ theorem StateRepresentedBy.applyObservedTotal
           simp only [State.applyObservedTotal, hsigned]
           constructor
           · intro candidate digest hcandid
-            by_cases heq : candidate = epoch
+            by_cases heq : candidate = leafIndex
             · subst candidate
               simp only [State.install, Function.update_self,
                 Option.some.injEq] at hcandid
@@ -692,7 +692,7 @@ theorem StateRepresentedBy.applyObservedTotal
                 hsignedRep candidate digest hold
               exact ⟨oldOutput, List.mem_append_left _ hmem, hdigest⟩
           · intro candidate digest hcandid
-            by_cases heq : candidate = epoch
+            by_cases heq : candidate = leafIndex
             · subst candidate
               simp [State.install] at hcandid
             · have hold : digest ∈ state.pending candidate := by
@@ -716,37 +716,37 @@ theorem replayObserved_hit_eq_true_hasCollisionPair
       rw [Bool.or_eq_true] at hhit
       rcases hhit with hhead | htail
       · cases action with
-        | query epoch output =>
-            cases hsigned : state.signed epoch with
+        | query leafIndex output =>
+            cases hsigned : state.signed leafIndex with
             | none => simp [head, State.applyObservedTotal, hsigned] at hhead
             | some target =>
                 have hquery : truncateHash output = target := by
                   simpa [head, State.applyObservedTotal, hsigned] using hhead
                 obtain ⟨signedOutput, hsignedMem, hsignedDigest⟩ :=
-                  hrepresented.1 epoch target hsigned
+                  hrepresented.1 leafIndex target hsigned
                 have hpair : List.Sublist
-                    [.sign epoch signedOutput, .query epoch output]
-                    (actionsBefore ++ .query epoch output :: tail) := by
+                    [.sign leafIndex signedOutput, .query leafIndex output]
+                    (actionsBefore ++ .query leafIndex output :: tail) := by
                   have hbase := (List.singleton_sublist.mpr hsignedMem).append
-                    (List.Sublist.refl [.query epoch output])
+                    (List.Sublist.refl [.query leafIndex output])
                   exact hbase.trans (by simp)
-                exact ⟨epoch, output, signedOutput,
+                exact ⟨leafIndex, output, signedOutput,
                   hquery.trans hsignedDigest.symm, Or.inr hpair⟩
-        | sign epoch output =>
-            cases hsigned : state.signed epoch with
+        | sign leafIndex output =>
+            cases hsigned : state.signed leafIndex with
             | some target => simp [head, State.applyObservedTotal, hsigned] at hhead
             | none =>
-                have hpending : truncateHash output ∈ state.pending epoch := by
+                have hpending : truncateHash output ∈ state.pending leafIndex := by
                   simpa [head, State.applyObservedTotal, hsigned] using hhead
                 obtain ⟨queriedOutput, hqueryMem, hqueryDigest⟩ :=
-                  hrepresented.2 epoch (truncateHash output) hpending
+                  hrepresented.2 leafIndex (truncateHash output) hpending
                 have hpair : List.Sublist
-                    [.query epoch queriedOutput, .sign epoch output]
-                    (actionsBefore ++ .sign epoch output :: tail) := by
+                    [.query leafIndex queriedOutput, .sign leafIndex output]
+                    (actionsBefore ++ .sign leafIndex output :: tail) := by
                   have hbase := (List.singleton_sublist.mpr hqueryMem).append
-                    (List.Sublist.refl [.sign epoch output])
+                    (List.Sublist.refl [.sign leafIndex output])
                   exact hbase.trans (by simp)
-                exact ⟨epoch, queriedOutput, output, hqueryDigest,
+                exact ⟨leafIndex, queriedOutput, output, hqueryDigest,
                   Or.inl hpair⟩
       · have htailPair := ih head.state (actionsBefore ++ [action])
           (hrepresented.applyObservedTotal action) htail
@@ -754,28 +754,28 @@ theorem replayObserved_hit_eq_true_hasCollisionPair
 
 theorem runObserved_empty_eq_true_of_collisionPair
     (actions : List ObservedAction)
-    (hnodup : (observedSignEpochs actions).Nodup)
+    (hnodup : (observedSignLeafIndices actions).Nodup)
     (hcollision : HasCollisionPair actions) :
     runObserved State.empty actions = true := by
-  obtain ⟨epoch, queriedOutput, signedOutput, hdigest, hpair | hpair⟩ := hcollision
+  obtain ⟨leafIndex, queriedOutput, signedOutput, hdigest, hpair | hpair⟩ := hcollision
   · obtain ⟨before, middle, after, hactions⟩ :=
       (pair_sublist_iff _ _ _).mp hpair
     subst actions
     simpa [List.append_assoc] using
       runObserved_empty_eq_true_of_query_before_sign_of_nodup
-        epoch queriedOutput signedOutput before middle after hdigest
+        leafIndex queriedOutput signedOutput before middle after hdigest
           (by simpa [List.append_assoc] using hnodup)
   · obtain ⟨before, middle, after, hactions⟩ :=
       (pair_sublist_iff _ _ _).mp hpair
     subst actions
     simpa [List.append_assoc] using
       runObserved_empty_eq_true_of_sign_before_query_of_nodup
-        epoch signedOutput queriedOutput before middle after hdigest.symm
+        leafIndex signedOutput queriedOutput before middle after hdigest.symm
           (by simpa [List.append_assoc] using hnodup)
 
 theorem collisionPair_of_runObserved_empty_eq_true
     (actions : List ObservedAction)
-    (hnodup : (observedSignEpochs actions).Nodup)
+    (hnodup : (observedSignLeafIndices actions).Nodup)
     (hhit : runObserved State.empty actions = true) :
     HasCollisionPair actions := by
   have hvalid : (replayObserved State.empty actions).valid = true :=
@@ -789,10 +789,10 @@ theorem collisionPair_of_runObserved_empty_eq_true
 theorem runObserved_empty_eq_true_mono_sublist
     {left right : List ObservedAction}
     (hsub : List.Sublist left right)
-    (hnodup : (observedSignEpochs right).Nodup)
+    (hnodup : (observedSignLeafIndices right).Nodup)
     (hhit : runObserved State.empty left = true) :
     runObserved State.empty right = true := by
-  have hsignSub := observedSignEpochs_sublist hsub
+  have hsignSub := observedSignLeafIndices_sublist hsub
   have hleftNodup := hsignSub.nodup hnodup
   exact runObserved_empty_eq_true_of_collisionPair right hnodup
     ((collisionPair_of_runObserved_empty_eq_true left hleftNodup hhit).mono hsub)

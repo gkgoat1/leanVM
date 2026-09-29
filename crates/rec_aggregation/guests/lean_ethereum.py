@@ -299,7 +299,7 @@ AGG_SEED_0 = AGG_SEED_0_PLACEHOLDER
 AGG_SEED_1 = AGG_SEED_1_PLACEHOLDER
 # The statement digest's preimage: the STMT_HEADER header values as the 16-byte
 # cells they already are (the seed and the signer-set digest, which itself binds
-# the epoch groups and every count), then the deferred cells' tower limbs, two to
+# the leaf index groups and every count), then the deferred cells' tower limbs, two to
 # a cell and four cells to a 64-byte block. No domain tag: the seed leads, and it
 # binds this bytecode and flock's R1CS.
 STMT_HEADER = STMT_HEADER_PLACEHOLDER
@@ -340,7 +340,7 @@ CHAIN_STEPS = CHAIN_LENGTH - 1
 WORDS_PER_VALUE = 1
 WORDS_PER_BLOCK = 2
 # Tweak table (one 1-cell tweak per index): encoding | V·CHAIN_STEPS chain |
-# wots-pk | merkle. Derived in-circuit, once per epoch group the statement carries.
+# wots-pk | merkle. Derived in-circuit, once per leaf index group the statement carries.
 N_TWEAKS = 1 + V * CHAIN_STEPS + 1 + LOG_LIFETIME
 N_TWEAK_CELLS = WORDS_PER_VALUE * N_TWEAKS
 WOTS_PK_TWEAK_IDX = 1 + V * CHAIN_STEPS
@@ -404,13 +404,13 @@ SP_COUNTER_BITS = 32
 # --------------------------------------------------------------- node capacities
 # MAX_KEYS caps the coverage table's slots, both schemes' declared keys and their
 # duplicates, which is what the coverage range check needs below 2^MIN_LOG_MEM;
-# MAX_RECURSIONS is the arity of an aggregation tree; MAX_EPOCHS caps the runtime
-# number of XMSS epoch groups.
+# MAX_RECURSIONS is the arity of an aggregation tree; MAX_LEAF_INDICES caps the runtime
+# number of XMSS leaf index groups.
 MAX_KEYS = MAX_KEYS_PLACEHOLDER
 MAX_DA_ROOTS = MAX_DA_ROOTS_PLACEHOLDER
 DA_ROOT_COUNTS = DA_ROOT_COUNTS_PLACEHOLDER
 MAX_RECURSIONS = MAX_RECURSIONS_PLACEHOLDER
-MAX_EPOCHS = MAX_EPOCHS_PLACEHOLDER
+MAX_LEAF_INDICES = MAX_LEAF_INDICES_PLACEHOLDER
 
 
 # ---------------------------------- LeanDA ------------------------------------------
@@ -2200,7 +2200,7 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_logs_pow2, g_squares, defer_out):
 
 
 # ============================ XMSS signature verification ===========================
-# One signature of its epoch group's (epoch, message), against the signer's public
+# One signature of its leaf index group's (leaf index, message), against the signer's public
 # key at `pk_ptr[g^0..g^1]` = (merkle_root, public_param). Every 16-byte native
 # value (tweak, digest, chain tip, sibling, pp) is one canonical 128-bit cell.
 # Tweak table layout (tweak index t at cell g^t):
@@ -2210,16 +2210,16 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_logs_pow2, g_squares, defer_out):
 #     MERKLE_TWEAK_IDX + l     : merkle tweak, level l < LOG_LIFETIME
 
 
-def fill_xmss_epoch_tables(epoch, merkle_bits, tweak_table):
-    # The tweak table and the Merkle direction bits at `epoch`, shared by every XMSS
+def fill_xmss_leaf_index_tables(leaf_index, merkle_bits, tweak_table):
+    # The tweak table and the Merkle direction bits at `leaf_index`, shared by every XMSS
     # signature this node verifies at it. One bit decomposition gives all three uses:
-    # a tweak's index field is the epoch (encoding, chain, wots-pk) or the parent
-    # index `epoch >> lvl` at Merkle level lvl - 1, and the direction bit at that
+    # a tweak's index field is the leaf index (encoding, chain, wots-pk) or the parent
+    # index `leaf_index >> lvl` at Merkle level lvl - 1, and the direction bit at that
     # level IS bit lvl - 1. Booleanity is a write-once pin and the reconstruction
-    # ties the bits back to the epoch, which also bounds it to LOG_LIFETIME bits.
+    # ties the bits back to the leaf index, which also bounds it to LOG_LIFETIME bits.
     # SPHINCS shares none of this, deriving every tweak from the index its own
     # digest picks, which is neither public nor shared between signers.
-    hint_decompose_bits(merkle_bits, epoch, LOG_LIFETIME)
+    hint_decompose_bits(merkle_bits, leaf_index, LOG_LIFETIME)
     bits = StackBuf(LOG_LIFETIME)
     reconstructed = 0
     index = 0
@@ -2229,13 +2229,13 @@ def fill_xmss_epoch_tables(epoch, merkle_bits, tweak_table):
         bits[b] = bit
         reconstructed += bit * COORD_BASIS[b]
         index += bit * XM_INDEX_WEIGHT[b]
-    assert reconstructed == epoch
+    assert reconstructed == leaf_index
     tweak_table[1] = index + XM_ENC_TWEAK
     for i in unroll(0, V):
         for s in unroll(0, CHAIN_STEPS):
             tweak_table[GEN ** (1 + CHAIN_STEPS * i + s)] = index + XM_CHAIN_TWEAKS[CHAIN_STEPS * i + s]
     tweak_table[GEN ** WOTS_PK_TWEAK_IDX] = index + XM_PK_TWEAK
-    # Merkle level lvl - 1 hashes the parent at `epoch >> lvl`: the epoch's bits from
+    # Merkle level lvl - 1 hashes the parent at `leaf_index >> lvl`: the leaf_index's bits from
     # lvl up, each weighed lvl places down. The top level gets the empty sum.
     for lvl in unroll(1, LOG_LIFETIME + 1):
         parent = 0
@@ -2297,7 +2297,7 @@ def verify_sig(message, tweak_table, merkle_bits, pk_ptr):
         blake2s([tips[8 * q - 4], tips[8 * q - 2]], [tips[8 * q], tips[8 * q + 2]], next_leaf, cv=leaf, counter=64 * (q + 1), final=(q + 1) // WOTS_PK_BLOCKS)
         leaf = next_leaf
 
-    # Merkle path from the leaf to the root: the epoch bit orders the two children at
+    # Merkle path from the leaf to the root: the leaf index bit orders the two children at
     # each level, and the tweak carries that level's parent index.
     node = leaf[0]
     for lvl in unroll(0, LOG_LIFETIME):
@@ -2545,7 +2545,7 @@ def statement_digest(seed_0, seed_1, signers_hash, da_0, da_1, defer):
 
 
 def keys_window(state_0, state_1, base, keys_ptr, x_q, g_squares):
-    # One window of an epoch group's key hash: SIGNERS_WINDOW blocks, two declared
+    # One window of a leaf index group's key hash: SIGNERS_WINDOW blocks, two declared
     # keys each (a key is two cells, a block four). Counters as in `sphincs_window`.
     nxt = scaled_log(x_q * GEN, g_squares, const(6 + SIGNERS_WINDOW_LOG))
     st = StackBuf(2)
@@ -2579,7 +2579,7 @@ def keys_tail(state_0, state_1, base, keys_ptr, k: Const):
 
 
 def key_list_digest(keys_ptr, half_g, odd_g, n_keys_g, g_squares):
-    # BLAKE2s of one epoch group's declared key list: 32 bytes a key, so the hashed
+    # BLAKE2s of one leaf index group's declared key list: 32 bytes a key, so the hashed
     # string is 32·n bytes and its last block is the only partial one. The n // 2
     # pairs and the odd key out make half + odd blocks; all but the last run in
     # windows plus a tail (doc §sec:prog-byte-counter), and the last carries the
@@ -2624,7 +2624,7 @@ def child_keys_window(state_0, state_1, base, keys_ptr, cover, marks, origin_g, 
     # but with both keys of a block read at hinted indices into THIS node's table and
     # marked in the coverage table. Each index is an offset into the parent group the
     # caller mapped this child group to, bounded by that group's size, so a child's
-    # key can only ever land on an XMSS slot of the right epoch.
+    # key can only ever land on an XMSS slot of the right leaf index.
     nxt = scaled_log(x_q * GEN, g_squares, const(6 + SIGNERS_WINDOW_LOG))
     st = StackBuf(2)
     st[0] = state_0
@@ -2668,7 +2668,7 @@ def child_keys_tail(state_0, state_1, base, keys_ptr, cover, marks, origin_g, li
 
 
 def child_key_list_digest(keys_ptr, cover, base, origin_g, limit_g, half_g, odd_g, n_keys_g, g_squares):
-    # BLAKE2s of one epoch group of a child's keys, over the same 32·n bytes the
+    # BLAKE2s of one leaf index group of a child's keys, over the same 32·n bytes the
     # child hashed (`key_list_digest`), so the digest it rebuilds is the one the
     # child's statement carries. `base` prefixes the coverage write values, which
     # count the keys off as they are marked.
@@ -2923,13 +2923,13 @@ def plain_tail(state_0, state_1, base, run_ptr, k: Const):
     return st[0], st[1], run_ptr * (GEN ** (4 * k))
 
 
-def signer_set_digest(run_ptr, n_epochs_g, g_squares):
+def signer_set_digest(run_ptr, n_leaf_indices_g, g_squares):
     # BLAKE2s of the signer set: both list lengths and the SPHINCS list's digest
-    # in the first block, then two blocks a group, its (epoch, count, message)
+    # in the first block, then two blocks a group, its (leaf index, count, message)
     # and its key list's digest. Every block is full, so the hash is over exactly
-    # 64·(1 + 2·epochs) bytes, and leading with both lengths makes the encoding
+    # 64·(1 + 2·n_leaf_indices) bytes, and leading with both lengths makes the encoding
     # prefix-free: no set's string is a prefix of another's.
-    blocks = n_epochs_g * n_epochs_g * GEN  # g^(1 + 2·epochs)
+    blocks = n_leaf_indices_g * n_leaf_indices_g * GEN  # g^(1 + 2·n_leaf_indices)
     split = StackBuf(2)
     hint_witness(split, "signers_split")
     windows = split[0]
@@ -2958,12 +2958,12 @@ def signer_set_digest(run_ptr, n_epochs_g, g_squares):
     return digest[0], digest[1]
 
 
-def rebuild_child_groups(nsub_e_g, run_ptr, base, epochs, msgs, group_base, group_slots, n_epochs_g, xmss_table, cover, g_squares):
-    # The child's epoch groups, written into the run its own signer-set hash covers,
-    # two blocks a group exactly as the child laid them out: its (epoch, count,
+def rebuild_child_groups(nsub_e_g, run_ptr, base, leaf_indices, msgs, group_base, group_slots, n_leaf_indices_g, xmss_table, cover, g_squares):
+    # The child's leaf index groups, written into the run its own signer-set hash covers,
+    # two blocks a group exactly as the child laid them out: its (leaf index, count,
     # message), then the digest of its keys, read from THIS node's table through
     # hinted indices. A hinted map ties each group to the parent group holding the
-    # same epoch AND message, whose region its keys land in. Everything hinted here
+    # same leaf index AND message, whose region its keys land in. Everything hinted here
     # is pinned by the digest, which the child's statement carries. The running
     # product of the group counts prefixes each group's coverage writes and ends as
     # the child's XMSS claim count.
@@ -2971,12 +2971,12 @@ def rebuild_child_groups(nsub_e_g, run_ptr, base, epochs, msgs, group_base, grou
     counts[GEN ** 0] = 1
     for xj in mul_range(1, nsub_e_g):
         grp = StackBuf(4)
-        hint_witness(grp, "child_group")  # epoch, msg_lo, msg_hi, count
+        hint_witness(grp, "child_group")  # leaf index, msg_lo, msg_hi, count
         n_keys = grp[3]
         assert log(n_keys) < MAX_KEYS
         parent = hint_witness("child_group_map")
-        assert log(parent) < log(n_epochs_g)
-        assert epochs[parent] == grp[0]
+        assert log(parent) < log(n_leaf_indices_g)
+        assert leaf_indices[parent] == grp[0]
         parent_msg = msgs * (parent * parent)
         assert parent_msg[1] == grp[1]
         assert parent_msg[GEN] == grp[2]
@@ -3238,25 +3238,25 @@ def cover_da_root(roots, cover, n_slots_g, mark):
 
 
 def main():
-    # One node of an aggregation tree: raw XMSS signatures grouped by the (epoch,
+    # One node of an aggregation tree: raw XMSS signatures grouped by the (leaf index,
     # message) they claim (a RUNTIME number of groups), n_raw_sphincs SPHINCS signatures
     # and n_children sub-proofs OF THIS SAME BYTECODE. Each XMSS group carries its
-    # own (epoch, message) pair, and each SPHINCS signature is against the message
+    # own (leaf index, message) pair, and each SPHINCS signature is against the message
     # in its own coverage slot. DA roots occupy a separate region of the same table.
     #
     # The declared lists are the signer set; the duplicate slots absorb keys a child
     # covers that the set does not declare. The coverage table is one region per
-    # epoch group, each its declared keys then its own duplicates, then SPHINCS
+    # leaf index group, each its declared keys then its own duplicates, then SPHINCS
     # and DA regions shaped the same way:
     #
-    #   [group 0: declared | dup]...[group n_epochs-1: declared | dup][SPHINCS: declared | dup][DA: declared | dup]
+    #   [group 0: declared | dup]...[group n_leaf_indices-1: declared | dup][SPHINCS: declared | dup][DA: declared | dup]
     #
     # The first n_decl groups are the signer set's; the n_drop after them declare
-    # nothing, holding a child group's (epoch, message) without publishing it.
+    # nothing, holding a child group's (leaf index, message) without publishing it.
     #
     # so one range check per write keeps each writer inside its own region: that is
     # what makes the statement's split mean which scheme verified which key against
-    # which (epoch, message). An XMSS slot is two cells, a SPHINCS slot four: a key
+    # which (leaf index, message). An XMSS slot is two cells, a SPHINCS slot four: a key
     # and the message that key signed. A DA root occupies two cells.
     meta = StackBuf(7)
     hint_witness(meta, "meta")  # every count in the exponent
@@ -3267,11 +3267,11 @@ def main():
     n_raw_s_g = meta[4]
     n_children_g = meta[5]
     n_direct_da_g = meta[6]
-    # Declared plus dropped, so bounding each side pins n_decl <= n_epochs.
-    assert log(n_decl_g) < MAX_EPOCHS + 1
-    assert log(n_drop_g) < MAX_EPOCHS + 1
-    n_epochs_g = n_decl_g * n_drop_g
-    assert log(n_epochs_g) < MAX_EPOCHS + 1
+    # Declared plus dropped, so bounding each side pins n_decl <= n_leaf_indices.
+    assert log(n_decl_g) < MAX_LEAF_INDICES + 1
+    assert log(n_drop_g) < MAX_LEAF_INDICES + 1
+    n_leaf_indices_g = n_decl_g * n_drop_g
+    assert log(n_leaf_indices_g) < MAX_LEAF_INDICES + 1
     assert log(n_sphincs_g) < MAX_KEYS
     assert log(n_sdup_g) < MAX_KEYS
     assert log(n_raw_s_g) < MAX_KEYS
@@ -3286,31 +3286,31 @@ def main():
     da_slots_g = n_da_g * n_da_dup_g
     assert log(da_slots_g) < MAX_RECURSIONS * MAX_DA_ROOTS + 2
 
-    # ---- the epoch groups: geometry pass ----
-    # Per group: its epoch, its two message cells, and its declared, duplicate and
+    # ---- the leaf index groups: geometry pass ----
+    # Per group: its leaf index, its two message cells, and its declared, duplicate and
     # raw-signature counts, each count bounded before it enters a product (up to
     # 2^16 factors of exponent < 2^17 stay far from the order 2^64 - 1, so nothing
     # wraps). Region bases and the three totals ride a stride-4 chain; the per-group
     # values land in heap buffers the later passes and the children's hinted group
     # maps read back at runtime.
-    epochs = HeapBuf(n_epochs_g)
-    msgs = HeapBuf(n_epochs_g * n_epochs_g)
-    group_n_keys = HeapBuf(n_epochs_g)
-    group_n_dups = HeapBuf(n_epochs_g)
-    group_n_raw = HeapBuf(n_epochs_g)
-    group_base = HeapBuf(n_epochs_g)
-    group_slots = HeapBuf(n_epochs_g)
-    geo = HeapBuf((n_epochs_g * GEN) ** 4)  # [base, n_xmss product, n_raw product]
+    leaf_indices = HeapBuf(n_leaf_indices_g)
+    msgs = HeapBuf(n_leaf_indices_g * n_leaf_indices_g)
+    group_n_keys = HeapBuf(n_leaf_indices_g)
+    group_n_dups = HeapBuf(n_leaf_indices_g)
+    group_n_raw = HeapBuf(n_leaf_indices_g)
+    group_base = HeapBuf(n_leaf_indices_g)
+    group_slots = HeapBuf(n_leaf_indices_g)
+    geo = HeapBuf((n_leaf_indices_g * GEN) ** 4)  # [base, n_xmss product, n_raw product]
     geo[1] = 1
     geo[GEN] = 1
     geo[GEN ** 2] = 1
-    for xe in mul_range(1, n_epochs_g):
+    for xe in mul_range(1, n_leaf_indices_g):
         grp = StackBuf(6)
-        hint_witness(grp, "group")  # epoch, msg_lo, msg_hi, n, n_dup, n_raw
+        hint_witness(grp, "group")  # leaf index, msg_lo, msg_hi, n, n_dup, n_raw
         assert log(grp[3]) < MAX_KEYS
         assert log(grp[4]) < MAX_KEYS
         assert log(grp[5]) < MAX_KEYS
-        epochs[xe] = grp[0]
+        leaf_indices[xe] = grp[0]
         msg = msgs * (xe * xe)
         msg[1] = grp[1]
         msg[GEN] = grp[2]
@@ -3326,7 +3326,7 @@ def main():
         nxt[1] = base * slots
         nxt[GEN] = state[GEN] * grp[3]
         nxt[GEN ** 2] = state[GEN ** 2] * grp[5]
-    geo_end = geo * (n_epochs_g ** 4)
+    geo_end = geo * (n_leaf_indices_g ** 4)
     xmss_slots_g = geo_end[1]
     n_raw_x_g = geo_end[GEN ** 2]
     sphincs_slots_g = n_sphincs_g * n_sdup_g
@@ -3354,13 +3354,13 @@ def main():
         root = da_roots * (xd ** 4)
         hint_witness(root[0:4], "da_roots")
     da_0, da_1 = da_list_digest(da_roots, n_da_g)
-    # One table per scheme, the XMSS one an epoch group at a time: each group its
+    # One table per scheme, the XMSS one a leaf index group at a time: each group its
     # declared list (strictly sorted, checked by the outer verifier, which holds it)
     # followed by its own duplicate slots. The coverage indices below run over one
     # space: the group regions in order, then SPHINCS, then DA.
     #
     # The digest is a plain BLAKE2s of one string, in whole blocks: both lengths
-    # and the SPHINCS list's digest, then per group its (epoch, count,
+    # and the SPHINCS list's digest, then per group its (leaf index, count,
     # message) and its key list's digest, each list hashed plainly in turn. Leading
     # with both lengths makes the encoding prefix-free, so no set's string is a
     # prefix of another's and the digest binds its own lengths. `half` and `odd` are
@@ -3388,7 +3388,7 @@ def main():
         kd_0, kd_1 = key_list_digest(xmss_table * (base * base), halves[0], halves[1], n_keys, g_squares)
         group_msg = msgs * (xe * xe)
         slot = signers_run * (xe ** 8) * (GEN ** 4)
-        slot[1] = epochs[xe]
+        slot[1] = leaf_indices[xe]
         slot[GEN] = n_keys
         slot[GEN ** 2] = group_msg[1]
         slot[GEN ** 3] = group_msg[GEN]
@@ -3398,7 +3398,7 @@ def main():
         slot[GEN ** 7] = 0
     # The duplicate slots ride the same table but outside the hashed prefix, past
     # each group's declared keys. Over the whole table: a dropped group has only these.
-    for xe in mul_range(1, n_epochs_g):
+    for xe in mul_range(1, n_leaf_indices_g):
         n_keys = group_n_keys[xe]
         base = group_base[xe]
         dup_ptr = xmss_table * (base * base * n_keys * n_keys)
@@ -3424,22 +3424,22 @@ def main():
     # to one slot disagree), and the count below rejects a missed one. So every
     # declared claim is covered by a direct check of its own kind or by a verified
     # child. Each writer is confined to its own region, including DA roots.
-    # The raw XMSS walk runs one loop per epoch group, each signature verified
+    # The raw XMSS walk runs one loop per leaf index group, each signature verified
     # against that group's tables (built here, only for a group that holds raw
     # signatures); a stride-1 chain threads the running count across the groups.
     cover = HeapBuf(n_total_g)
     da_cover = cover * da_base_g
-    merkle_bits = HeapBuf(n_epochs_g ** MERKLE_BIT_CELLS)
-    tweak_tables = HeapBuf(n_epochs_g ** N_TWEAK_CELLS)
-    raw_count = HeapBuf(n_epochs_g * GEN)
+    merkle_bits = HeapBuf(n_leaf_indices_g ** MERKLE_BIT_CELLS)
+    tweak_tables = HeapBuf(n_leaf_indices_g ** N_TWEAK_CELLS)
+    raw_count = HeapBuf(n_leaf_indices_g * GEN)
     raw_count[GEN ** 0] = 1
-    for xe in mul_range(1, n_epochs_g):
+    for xe in mul_range(1, n_leaf_indices_g):
         n_raw = group_n_raw[xe]
         prefix = raw_count[xe]
         if n_raw != 1:
             tweak_table = tweak_tables * (xe ** N_TWEAK_CELLS)
             group_bits = merkle_bits * (xe ** MERKLE_BIT_CELLS)
-            fill_xmss_epoch_tables(epochs[xe], group_bits, tweak_table)
+            fill_xmss_leaf_index_tables(leaf_indices[xe], group_bits, tweak_table)
             slots = group_slots[xe]
             base = group_base[xe]
             keys = xmss_table * (base * base)
@@ -3450,7 +3450,7 @@ def main():
                 # discharged by `assert log(n_total_g) < MAX_KEYS` above. Without it
                 # this degenerates to what DEREF alone gives and an index could
                 # reach past `cover`, which is the whole bijection. The bound is
-                # this GROUP's region, so a signature verified at this (epoch,
+                # this GROUP's region, so a signature verified at this (leaf index,
                 # message) covers no other group's declared key.
                 assert log(idx) < log(slots)
                 cover[base * idx] = prefix * xi
@@ -3485,17 +3485,17 @@ def main():
         # chain, which the child's statement digest carries, so a lie about any of
         # it changes the public input its proof has to satisfy. Nothing demands a
         # mid-tree statement be canonical (sorted, distinct groups); it still binds
-        # every claim to its (epoch, message), which is all the group map relies on.
+        # every claim to its (leaf index, message), which is all the group map relies on.
         child_meta = StackBuf(2)
-        hint_witness(child_meta, "child_meta")  # n_epochs, n_sphincs
+        hint_witness(child_meta, "child_meta")  # n_leaf_indices, n_sphincs
         nsub_e_g = child_meta[0]
         nsub_s_g = child_meta[1]
-        assert log(nsub_e_g) < MAX_EPOCHS + 1
+        assert log(nsub_e_g) < MAX_LEAF_INDICES + 1
         assert log(nsub_s_g) < MAX_KEYS
         sub_run = HeapBuf(nsub_e_g ** 8 * GEN ** 4)
         sub_run[1] = nsub_e_g
         sub_run[GEN] = nsub_s_g
-        nsub_x_g = rebuild_child_groups(nsub_e_g, sub_run, base, epochs, msgs, group_base, group_slots, n_epochs_g, xmss_table, cover, g_squares)
+        nsub_x_g = rebuild_child_groups(nsub_e_g, sub_run, base, leaf_indices, msgs, group_base, group_slots, n_leaf_indices_g, xmss_table, cover, g_squares)
         # Implied by the per-group bounds and the child's own n_total assert; stands
         # as documentation.
         assert log(nsub_x_g) < MAX_KEYS

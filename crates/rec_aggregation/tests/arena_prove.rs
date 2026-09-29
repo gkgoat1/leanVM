@@ -14,7 +14,7 @@ fn repeated_proofs_survive_phase_resets() {
 
     let raw_xmss: Vec<_> = signers_cache::get_signers(3)
         .into_iter()
-        .map(|(pk, sig)| (pk, signers_cache::XMSS_EPOCH_A, signers_cache::message(), sig))
+        .map(|(pk, sig)| (pk, signers_cache::XMSS_LEAF_INDEX_A, signers_cache::message(), sig))
         .collect();
     let raw_sphincs = signers_cache::get_sphincs_signers(1);
     let blob: Vec<u64> = (0..lean_da::BLOB_SYMBOLS as u64).collect();
