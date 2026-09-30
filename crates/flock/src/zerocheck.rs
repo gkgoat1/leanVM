@@ -117,9 +117,19 @@ pub enum VerifyError {
 
 /// Send one multilinear round and advance the running claim, the prover mirror
 /// of the verifier's loop. `G(0)` never rides the wire: the eq split
-/// `(1 + r_eq)·G(0) + r_eq·G(1) = claim` fixes the constant coefficient.
-fn send_round(ps: &mut impl Transmitter, claim: F192, r_eq: F192, g1: F192, g_inf: F192, chis: &mut Vec<F192>) -> F192 {
-    let g0 = (claim + r_eq * g1) * (F192::ONE + r_eq).inv();
+/// `(1 + r_eq)·G(0) + r_eq·G(1) = claim` fixes the constant coefficient. At
+/// `r_eq = 1` it leaves `G(0)` free, so the caller passes it: only the table
+/// rounds can meet that, the earlier ones running on fixed challenges.
+fn send_round(
+    ps: &mut impl Transmitter,
+    claim: F192,
+    r_eq: F192,
+    g0: Option<F192>,
+    g1: F192,
+    g_inf: F192,
+    chis: &mut Vec<F192>,
+) -> F192 {
+    let g0 = g0.unwrap_or_else(|| (claim + r_eq * g1) * (F192::ONE + r_eq).inv());
     ps.add_round_poly(&[g0, g0 + g1 + g_inf, g_inf], true);
     let chi = ps.sample();
     chis.push(chi);
@@ -214,15 +224,15 @@ pub fn prove_packed_padded(
         let fold = BitFold::at_level(&lagrange, &mlv_chis);
         let pair = bit_round_pair(bits, &fold, &r_rest[t + 1..], padding);
         let (g1, g_inf) = pair.first;
-        c_running = send_round(ps, c_running, r_rest[t], g1, g_inf, &mut mlv_chis);
+        c_running = send_round(ps, c_running, r_rest[t], None, g1, g_inf, &mut mlv_chis);
         let (g1, g_inf) = pair.second(mlv_chis[t]);
-        c_running = send_round(ps, c_running, r_rest[t + 1], g1, g_inf, &mut mlv_chis);
+        c_running = send_round(ps, c_running, r_rest[t + 1], None, g1, g_inf, &mut mlv_chis);
     }
     let materialize_level = mlv_chis.len();
     let fold = BitFold::at_level(&lagrange, &mlv_chis);
     let ((g1, g_inf), [mut a_mlv, mut b_mlv, mut c_mlv]) =
         bit_round_materialize(bits, &fold, &r_rest[materialize_level + 1..], padding);
-    c_running = send_round(ps, c_running, r_rest[materialize_level], g1, g_inf, &mut mlv_chis);
+    c_running = send_round(ps, c_running, r_rest[materialize_level], None, g1, g_inf, &mut mlv_chis);
     drop(span);
     let span = tracing::info_span!("Table rounds").entered();
 
@@ -289,7 +299,15 @@ pub fn prove_packed_padded(
             (m1 + round_single_naive(&c_mlv, r_eq), mi)
         };
 
-        c_running = send_round(ps, c_running, r_rest[i + 1], m1, mi, &mut mlv_chis);
+        let r = r_rest[i + 1];
+        let g0 = (r == F192::ONE).then(|| {
+            // happens only with probability 2^(-192). We keep it for completeness, but not strictly necessary in the real world
+            let eq = primitives::multilinear::eq_table(r_eq);
+            (0..eq.len()).fold(F192::ZERO, |acc, x| {
+                acc + eq[x] * (a_mlv[2 * x] * b_mlv[2 * x] + c_mlv[2 * x])
+            })
+        });
+        c_running = send_round(ps, c_running, r, g0, m1, mi, &mut mlv_chis);
     }
 
     // ---- Final binding at ρ_{n_mlv} (the last challenge) ----
