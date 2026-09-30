@@ -75,11 +75,12 @@ impl<T> ArenaVec<T> {
     #[inline]
     #[must_use]
     pub unsafe fn zeroed(n: usize) -> Self {
-        // SAFETY: every slot is initialized by the write_bytes below before any
-        // read is possible.
-        let mut v = unsafe { Self::uninitialized(n) };
-        // SAFETY: `v` owns `n` slots; the caller guarantees all-zero is a valid `T`.
-        unsafe { ptr::write_bytes(v.as_mut_ptr(), 0u8, n) };
+        let mut v = Self::with_capacity(n);
+        // SAFETY: the allocation holds every slot and all-zero is a valid element.
+        unsafe {
+            ptr::write_bytes(v.as_mut_ptr(), 0u8, n);
+            v.set_len(n);
+        }
         v
     }
 
@@ -309,25 +310,30 @@ pub unsafe fn assume_init<T>(v: ArenaVec<MaybeUninit<T>>) -> ArenaVec<T> {
     unsafe { ArenaVec::from_raw_parts(ptr.cast::<T>(), len, cap) }
 }
 
+/// Releases owned storage even when an element destructor unwinds.
+struct AllocationGuard {
+    ptr: *mut u8,
+    size: usize,
+    align: usize,
+}
+
+impl Drop for AllocationGuard {
+    fn drop(&mut self) {
+        // SAFETY: only the owning vector's destructor transfers its allocation here.
+        unsafe { raw_dealloc(self.ptr, self.size, self.align) };
+    }
+}
+
 impl<T> Drop for ArenaVec<T> {
     fn drop(&mut self) {
-        // Drop the live elements first. Elided entirely for plain-data `T`.
+        let _allocation = (size_of::<T>() != 0 && self.cap != 0).then(|| AllocationGuard {
+            ptr: self.ptr.as_ptr().cast::<u8>(),
+            size: self.cap * size_of::<T>(),
+            align: align_of::<T>(),
+        });
         if needs_drop::<T>() {
-            // SAFETY: `0..len` are initialized.
+            // SAFETY: `0..len` are initialized; the allocation remains live through unwinding.
             unsafe { ptr::drop_in_place(ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len)) };
-        }
-        // Release the buffer. Zero-sized types and never-grown vectors own nothing.
-        if size_of::<T>() != 0 && self.cap != 0 {
-            // SAFETY: the buffer came from `raw_alloc(cap * size, align)`;
-            // `raw_dealloc` range-checks arena-vs-system, and an arena pointer is
-            // recycled or left to the next phase reset rather than unmapped.
-            unsafe {
-                raw_dealloc(
-                    self.ptr.as_ptr().cast::<u8>(),
-                    self.cap * size_of::<T>(),
-                    align_of::<T>(),
-                );
-            }
         }
     }
 }
