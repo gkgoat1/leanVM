@@ -97,8 +97,7 @@ pub fn range_hi_ratio() -> F64 {
 }
 
 /// Where a table keeps its `n` accesses' columns, grouped by kind so that each kind
-/// is contiguous: the previous timestamps `X`, the gap's low and high chunks, then
-/// the counts of the two range reads.
+/// is contiguous: the previous timestamps `X`, then the gap's low and high chunks.
 #[derive(Clone, Copy)]
 pub(crate) struct Acc {
     base: usize,
@@ -115,14 +114,8 @@ impl Acc {
     const fn hi(&self, i: usize) -> usize {
         self.base + 2 * self.n + i
     }
-    const fn count_lo(&self, i: usize) -> usize {
-        self.base + 3 * self.n + i
-    }
-    const fn count_hi(&self, i: usize) -> usize {
-        self.base + 4 * self.n + i
-    }
     const fn end(&self) -> usize {
-        self.base + 5 * self.n
+        self.base + 3 * self.n
     }
 }
 
@@ -156,12 +149,10 @@ impl FlushBuilder {
         );
     }
 
-    /// A read of a lookup array (§sec:lookup): `tuple` as pulled, `tuple[2]` being
-    /// its count column `count`, pushed back with the count advanced by ×g.
-    fn counted(&mut self, tuple: Vec<Coord>, count: usize) {
-        let mut push = tuple.clone();
-        push[2] = GCol(count, 1);
-        self.pair(push, tuple);
+    /// A read of a lookup array (§sec:lookup): one pull of `tuple`, which the array's
+    /// own side pushes as often as it is read.
+    fn read(&mut self, tuple: Vec<Coord>) {
+        self.pull.push(tuple);
     }
 
     /// Access `i` of the row, at clock slot `slot` (§sec:memchan), to the cell `addr`
@@ -175,14 +166,8 @@ impl FlushBuilder {
             vec![Const(sep), addr.clone(), GCol(ts, slot), new],
             vec![Const(sep), addr, Col(acc.x(i)), old],
         );
-        self.counted(
-            vec![Const(SEP_RANGE_LO), Col(acc.lo(i)), Col(acc.count_lo(i))],
-            acc.count_lo(i),
-        );
-        self.counted(
-            vec![Const(SEP_RANGE_HI), Col(acc.hi(i)), Col(acc.count_hi(i))],
-            acc.count_hi(i),
-        );
+        self.read(vec![Const(SEP_RANGE_LO), Col(acc.lo(i))]);
+        self.read(vec![Const(SEP_RANGE_HI), Col(acc.hi(i))]);
     }
 }
 
@@ -304,21 +289,19 @@ impl<'a> FillCtx<'a> {
         });
     }
 
-    /// The `5·n` columns of a table's accesses, one kind at a time.
+    /// The `3·n` columns of a table's accesses, one kind at a time.
     fn accesses<R: Sync>(&self, out: &mut [ColumnOut], rows: &'a [R], acc: Acc, f: fn(&R) -> &[Access]) {
         let mask = (1u32 << RANGE_LOG) - 1;
         let (range_lo, range_hi) = (self.range_lo, self.range_hi);
         for i in 0..acc.n {
-            // One writer per access: its previous timestamp, its gap's two range entries, their two counts.
-            let at = [acc.x(i), acc.lo(i), acc.hi(i), acc.count_lo(i), acc.count_hi(i)];
+            // One writer per access: its previous timestamp and its gap's two range entries.
+            let at = [acc.x(i), acc.lo(i), acc.hi(i)];
             self.cols_at(out, rows, at, move |r| {
                 let a = &f(r)[i];
                 [
                     a.x,
                     range_lo[(a.gap & mask) as usize],
                     range_hi[(a.gap >> RANGE_LOG) as usize],
-                    a.count_lo,
-                    a.count_hi,
                 ]
             });
         }
@@ -626,10 +609,10 @@ pub fn tables() -> &'static [ClassTable; N_TABLES] {
 
 /// The slot of a bytecode tuple that holds a row's [`Word::Bad`]: past every field of
 /// an entry, where the program is zero.
-pub const BAD_SLOT: usize = 13;
+pub const BAD_SLOT: usize = 12;
 
 /// Bytecode slot binding the exit selector.
-pub const EXIT_SLOT: usize = 14;
+pub const EXIT_SLOT: usize = 13;
 
 /// The `rs2` read's columns: the register's number and what it held.
 #[derive(Clone, Copy)]
@@ -685,7 +668,7 @@ impl BlockCols {
 
 /// A class table's local columns: `pc, ts, a1, pc4, v1, flags`, then the optional groups.
 ///
-/// The groups are in the order of the fields below, then come the accesses and the bytecode read's count.
+/// The groups are in the order of the fields below, then come the accesses.
 #[derive(Clone, Copy)]
 struct Cols {
     pc: usize,
@@ -704,8 +687,6 @@ struct Cols {
     block: Option<BlockCols>,
     bad: Option<usize>,
     acc: Acc,
-    /// The bytecode read's count, the last column.
-    rbc: usize,
 }
 
 impl Cols {
@@ -747,7 +728,7 @@ impl Cols {
         };
         let bad = spec.ports.contains(&Word::Bad).then(|| take(1));
         let n = spec.n_accesses();
-        let acc = Acc { base: take(5 * n), n };
+        let acc = Acc { base: take(3 * n), n };
         Self {
             pc,
             ts,
@@ -763,7 +744,6 @@ impl Cols {
             block,
             bad,
             acc,
-            rbc: take(1),
         }
     }
 
@@ -800,14 +780,11 @@ pub struct ClassTable {
     index: usize,
     spec: &'static ClassSpec,
     cols: Cols,
-    counts: Vec<usize>,
 }
 
 impl ClassTable {
     fn new(index: usize) -> Self {
         let spec = CLASSES[index];
-        let cols = Cols::new(spec);
-        assert_eq!(cols.rbc, cols.acc.end(), "the counts are the table's last columns");
         // Invariant: a register access exists exactly when its value is a circuit word.
         assert_eq!(
             spec.reads_rs2,
@@ -824,22 +801,13 @@ impl ClassTable {
         Self {
             index,
             spec,
-            cols,
-            // The accesses' counts end `acc`, and the bytecode's follows.
-            counts: (cols.acc.count_lo(0)..=cols.rbc).collect(),
+            cols: Cols::new(spec),
         }
     }
 
     /// Number of columns, the virtual ones included.
     pub fn n_committed_columns(&self) -> usize {
-        self.cols.rbc + 1
-    }
-
-    /// The read-count columns: the `g^{count}` values of the table's lookups into the
-    /// read-only arrays (the bytecode, the two range arrays).
-    /// Each gets a single-column block of the count side of the bus.
-    pub fn count_columns(&self) -> &[usize] {
-        &self.counts
+        self.cols.acc.end()
     }
 
     /// How many identities the table folds, which sizes its slice of the batch's
@@ -903,7 +871,6 @@ impl ClassTable {
         let mut entry = vec![
             Const(SEP_BYTECODE),
             Col(c.pc),
-            Col(c.rbc),
             Const(g_pow(self.index)),
             Col(c.flags),
             Col(c.a1),
@@ -919,7 +886,7 @@ impl ClassTable {
         }
         entry.resize(EXIT_SLOT, Const(F64::ZERO));
         entry.push(c.control.map_or(Const(F64::ZERO), |k| Col(k.exit)));
-        f.counted(entry, c.rbc);
+        f.read(entry);
         // The accesses' columns are in the order the row makes them.
         let mut n = 0;
         let mut next = || {
@@ -1022,8 +989,20 @@ impl ClassTable {
             ctx.col(out, rows, bad, move |_| F64::ZERO);
         }
         ctx.accesses(out, rows, c.acc, Row::accesses);
-        ctx.col(out, rows, c.rbc, move |r| r.bytecode_read);
     }
+}
+
+/// Table `t`'s access `i`'s local columns: its previous timestamp, then its gap's two chunks.
+#[cfg(test)]
+pub(crate) fn access_columns(t: usize, i: usize) -> [usize; 3] {
+    let acc = Cols::new(CLASSES[t]).acc;
+    [acc.x(i), acc.lo(i), acc.hi(i)]
+}
+
+/// Table `t`'s local column holding a branch's target offset.
+#[cfg(test)]
+pub(crate) fn branch_offset_column(t: usize) -> usize {
+    Cols::new(CLASSES[t]).control.expect("a control class").dt
 }
 
 #[cfg(test)]

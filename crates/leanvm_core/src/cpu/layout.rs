@@ -1,6 +1,6 @@
 //! The public column schema and bus layout: the committed-column indices, and
-//! the flush/count blocks the verifier reconstructs from the program and the
-//! announced sizes. Plus the prover-side witness build.
+//! the flush blocks and producers the verifier reconstructs from the program and
+//! the announced sizes. Plus the prover-side witness build.
 
 use super::*;
 use crate::leaf::SparseColumn;
@@ -18,19 +18,13 @@ pub enum Framework {
     Registers,
     Ram,
     Advice,
-    Bytecode,
-    RangeLo,
-    RangeHi,
 }
 
-pub const FRAMEWORK: [Framework; 7] = [
+pub const FRAMEWORK: [Framework; 4] = [
     Framework::State,
     Framework::Registers,
     Framework::Ram,
     Framework::Advice,
-    Framework::Bytecode,
-    Framework::RangeLo,
-    Framework::RangeHi,
 ];
 
 impl Framework {
@@ -41,16 +35,45 @@ impl Framework {
             Framework::Registers => LOG_REGS,
             Framework::Ram => sizes.log_ram,
             Framework::Advice => sizes.log_advice,
-            Framework::Bytecode => sizes.log_bytecode,
-            Framework::RangeLo | Framework::RangeHi => tables::RANGE_LOG,
+        }
+    }
+}
+
+/// The read-only arrays (§sec:lookup), whose table side is a producer rather than a
+/// pair of framework blocks, in this order: it pushes every entry as often as it is
+/// read, which a committed multiplicity column says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lookup {
+    Bytecode,
+    RangeLo,
+    RangeHi,
+}
+
+pub const LOOKUPS: [Lookup; 3] = [Lookup::Bytecode, Lookup::RangeLo, Lookup::RangeHi];
+
+impl Lookup {
+    /// `log2` of the array's entries.
+    pub fn log_rows(self, sizes: Sizes) -> usize {
+        match self {
+            Lookup::Bytecode => sizes.log_bytecode,
+            Lookup::RangeLo | Lookup::RangeHi => tables::RANGE_LOG,
+        }
+    }
+
+    /// The committed column of how often each entry is read.
+    pub const fn multiplicity(self) -> Shared {
+        match self {
+            Lookup::Bytecode => Shared::BytecodeMult,
+            Lookup::RangeLo => Shared::RangeLoMult,
+            Lookup::RangeHi => Shared::RangeHiMult,
         }
     }
 }
 
 /// The committed columns no table owns, which come first in the global column order.
 ///
-/// The program is PUBLIC, not committed: it rides the bytecode blocks as `Coord::Public`,
-/// and only the witness-dependent counts are committed. So are the registers and RAM
+/// The program is PUBLIC, not committed: it rides the bytecode producer as `Coord::Public`,
+/// and only the witness-dependent multiplicities are committed. So are the registers and RAM
 /// before the run, zero and the program's image: what is committed is what they hold
 /// after it, and each cell's last timestamp (§sec:memchan). The advice is the one array
 /// whose initial words are committed as well: they are the prover's.
@@ -64,11 +87,13 @@ pub enum Shared {
     AdvInit,
     AdvFin,
     AdvTs,
-    /// Each bytecode entry's execution count, `g^{A[pc]}`.
-    BytecodeCount,
-    /// Each range array entry's read count (§sec:rangecheck).
-    RangeLoCount,
-    RangeHiCount,
+    /// How often each entry of the three lookup arrays is read (§sec:lookup): the
+    /// bytecode's, then the two range arrays' (§sec:rangecheck). Entry `x`'s word is the
+    /// integer `m_x`, and its bits are the producer's one-bit columns, opened by ring
+    /// switching.
+    BytecodeMult,
+    RangeLoMult,
+    RangeHiMult,
 }
 
 pub const SHARED: [Shared; 10] = [
@@ -79,9 +104,9 @@ pub const SHARED: [Shared; 10] = [
     Shared::AdvInit,
     Shared::AdvFin,
     Shared::AdvTs,
-    Shared::BytecodeCount,
-    Shared::RangeLoCount,
-    Shared::RangeHiCount,
+    Shared::BytecodeMult,
+    Shared::RangeLoMult,
+    Shared::RangeHiMult,
 ];
 
 impl Shared {
@@ -90,21 +115,22 @@ impl Shared {
         self as usize
     }
 
-    /// The block whose rows the column has.
-    fn block(self) -> Framework {
+    /// `log2` of the column's rows: one per cell or entry of its array.
+    fn log_rows(self, sizes: Sizes) -> usize {
         match self {
-            Shared::RegFin | Shared::RegTs => Framework::Registers,
-            Shared::RamFin | Shared::RamTs => Framework::Ram,
-            Shared::AdvInit | Shared::AdvFin | Shared::AdvTs => Framework::Advice,
-            Shared::BytecodeCount => Framework::Bytecode,
-            Shared::RangeLoCount => Framework::RangeLo,
-            Shared::RangeHiCount => Framework::RangeHi,
+            Shared::RegFin | Shared::RegTs => Framework::Registers.log_rows(sizes),
+            Shared::RamFin | Shared::RamTs => Framework::Ram.log_rows(sizes),
+            Shared::AdvInit | Shared::AdvFin | Shared::AdvTs => Framework::Advice.log_rows(sizes),
+            Shared::BytecodeMult => Lookup::Bytecode.log_rows(sizes),
+            Shared::RangeLoMult => Lookup::RangeLo.log_rows(sizes),
+            Shared::RangeHiMult => Lookup::RangeHi.log_rows(sizes),
         }
     }
 
-    /// The column's values, from the run.
-    fn values(self, tr: &Trace) -> &[F64] {
-        match self {
+    /// The column's values, as the run left them: none for a multiplicity column, which
+    /// [`count_reads`] counts from the rows.
+    fn values(self, tr: &Trace) -> Option<&[F64]> {
+        Some(match self {
             Shared::RegFin => &tr.reg_fin,
             Shared::RegTs => &tr.reg_ts,
             Shared::RamFin => &tr.ram_fin,
@@ -112,10 +138,8 @@ impl Shared {
             Shared::AdvInit => &tr.adv_init,
             Shared::AdvFin => &tr.adv_fin,
             Shared::AdvTs => &tr.adv_ts,
-            Shared::BytecodeCount => &tr.bytecode_count,
-            Shared::RangeLoCount => &tr.range_lo_count,
-            Shared::RangeHiCount => &tr.range_hi_count,
-        }
+            Shared::BytecodeMult | Shared::RangeLoMult | Shared::RangeHiMult => return None,
+        })
     }
 }
 
@@ -175,8 +199,8 @@ fn offset_coord(base: usize, c: Coord) -> Coord {
 pub struct Layout {
     pub push: Vec<Block>,
     pub pull: Vec<Block>,
-    /// Count channel: the lookups' read-count columns, whose product must be nonzero (§sec:lookup).
-    pub count: Vec<Block>,
+    /// The three lookup arrays' table sides, in [`LOOKUPS`] order (§sec:lookup).
+    pub producers: Vec<Producer>,
     /// Where each column sits in the stacked witness; from the columns' log-sizes
     /// alone, so reconstructable by the verifier.
     pub placements: Vec<Placement>,
@@ -192,6 +216,13 @@ impl Layout {
         self.placements[q_column(t)]
             .window()
             .expect("a packed witness is committed")
+    }
+
+    /// A producer's multiplicity column's window in the stack.
+    pub(crate) fn multiplicity_window(&self, p: &Producer) -> witness::Window {
+        self.placements[p.col]
+            .window()
+            .expect("a multiplicity column is committed")
     }
 }
 
@@ -269,10 +300,7 @@ impl Sizes {
 /// binding.
 fn column_sources(sizes: Sizes, taus: [usize; tables::N_TABLES]) -> Vec<Source> {
     let stride_log = |t: usize| crate::class_flock::stride_log(tables::CLASSES[t]);
-    let mut sources: Vec<Source> = SHARED
-        .iter()
-        .map(|c| Source::Committed(c.block().log_rows(sizes)))
-        .collect();
+    let mut sources: Vec<Source> = SHARED.iter().map(|c| Source::Committed(c.log_rows(sizes))).collect();
     sources.extend((0..tables::N_TABLES).map(|t| Source::Committed(taus[t] + stride_log(t))));
     for (t, table) in tables::tables().iter().enumerate() {
         let base = sources.len();
@@ -291,11 +319,11 @@ fn column_sources(sizes: Sizes, taus: [usize; tables::N_TABLES]) -> Vec<Source> 
 
 /// How many PUBLIC columns a bytecode entry is: the class tag, then `flags, a1, a2,
 /// ad, imm, pc4, dt, link, jalr`, a zero verdict, and the exit selector (§sec:e2e-bc).
-pub const N_BYTECODE_COLUMNS: usize = tables::EXIT_SLOT - 2;
+pub const N_BYTECODE_COLUMNS: usize = tables::EXIT_SLOT + 1 - crate::leaf::BYTECODE_PUBLIC_SLOT;
 
 /// The public bytecode columns over the program cube, in bytecode-slot order. The
-/// program is not committed, so these ride the seed/finalize blocks as
-/// `Coord::Public` and stack into the polynomial [`bytecode_table`] returns.
+/// program is not committed, so these ride the bytecode producer as `Coord::Public` and
+/// stack into the polynomial [`bytecode_table`] returns.
 pub fn bytecode_columns(p: &rv::Program) -> [Vec<F64>; N_BYTECODE_COLUMNS] {
     let column = |f: &(dyn Fn(usize, &rv::Entry) -> u64 + Sync)| {
         parallel::map_collect(p.entries.len(), |i| F64(f(i, &p.entries[i])))
@@ -319,6 +347,19 @@ pub fn bytecode_columns(p: &rv::Program) -> [Vec<F64>; N_BYTECODE_COLUMNS] {
     ]
 }
 
+/// The bytecode's entries as the bus carries them: the separator, entry `i`'s address
+/// `TEXT_BASE + 4i`, then the program's public columns.
+fn bytecode_tuple(p: &rv::Program) -> Vec<Coord> {
+    let pc = Coord::IntIndex {
+        base: F64(TEXT_BASE),
+        shift: 2,
+    };
+    [Coord::Const(SEP_BYTECODE), pc]
+        .into_iter()
+        .chain(bytecode_columns(p).map(|c| Coord::Public(std::sync::Arc::new(c))))
+        .collect()
+}
+
 /// The stacked bytecode polynomial: the columns at their bus tuple coordinates,
 /// which is what makes the program's whole share of a bus leaf one evaluation at
 /// `(ζ, α⃗)` (see [`crate::leaf::stacked_bytecode_table`]).
@@ -326,11 +367,25 @@ pub fn bytecode_columns(p: &rv::Program) -> [Vec<F64>; N_BYTECODE_COLUMNS] {
 /// This is the multilinear an outermost verifier is handed in place of a
 /// structured program, and what the program digest binds ([`Program::new`]).
 pub fn bytecode_table(p: &rv::Program) -> Vec<F64> {
-    let coords = bytecode_columns(p)
-        .map(|c| Coord::Public(std::sync::Arc::new(c)))
-        .into();
-    let block = Block::framework(crate::log2_strict_usize(p.entries.len()), coords);
-    crate::leaf::stacked_bytecode_table(std::slice::from_ref(&block))
+    crate::leaf::stacked_bytecode_table(crate::log2_strict_usize(p.entries.len()), &bytecode_tuple(p))
+}
+
+/// How many bits of its multiplicities each lookup array's producer puts on the bus, in
+/// [`LOOKUPS`] order: enough for the most reads the tables of these heights can make of
+/// it, every row reading the bytecode once and each range array once per access the row
+/// makes. Completeness only: no read count is too large for soundness.
+pub fn multiplicity_bits(taus: [usize; tables::N_TABLES]) -> [usize; 3] {
+    let rows: u64 = taus.iter().map(|&tau| 1u64 << tau).sum();
+    let accesses: u64 = tables::CLASSES
+        .iter()
+        .zip(taus)
+        .map(|(spec, tau)| (spec.n_accesses() as u64) << tau)
+        .sum();
+    let bits = |reads: u64| (u64::BITS - reads.leading_zeros()) as usize;
+    LOOKUPS.map(|lookup| match lookup {
+        Lookup::Bytecode => bits(rows),
+        Lookup::RangeLo | Lookup::RangeHi => bits(accesses),
+    })
 }
 
 /// Build the public [`Layout`] from the program, the tables' log heights `taus` and the
@@ -343,23 +398,18 @@ pub fn bytecode_table(p: &rv::Program) -> Vec<F64> {
 /// tuples to divide back out of the bus.
 pub fn layout(p: &rv::Program, taus: [usize; tables::N_TABLES], ts_final: F64) -> Layout {
     let sizes = Sizes::of(p);
-    // Shared between the seed and finalize blocks: a copy is tens of megabytes per
-    // column at production sizes.
-    let prog_cols: [std::sync::Arc<Vec<F64>>; N_BYTECODE_COLUMNS] = bytecode_columns(p).map(std::sync::Arc::new);
-
     let mut push: Vec<Block> = Vec::new();
     let mut pull: Vec<Block> = Vec::new();
     for block in FRAMEWORK {
         let kappa = block.log_rows(sizes);
-        let (seed, finalize) = framework_tuples(block, p, &prog_cols, ts_final);
+        let (seed, finalize) = framework_tuples(block, p, ts_final);
         push.push(Block::framework(kappa, seed));
         pull.push(Block::framework(kappa, finalize));
     }
 
-    // Per-table blocks: each table declares its flushes and read-count columns in
-    // local indices; offset them to the table's global columns.
+    // Per-table blocks: each table declares its flushes in local indices; offset them
+    // to the table's global columns.
     let sch = schema();
-    let mut count: Vec<Block> = Vec::new();
     for (t, table) in tables::tables().iter().enumerate() {
         let (base, kappa) = (sch.spans[t].0, taus[t]);
         let fb = table.flushes();
@@ -373,19 +423,25 @@ pub fn layout(p: &rv::Program, taus: [usize; tables::N_TABLES], ts_final: F64) -
                 .into_iter()
                 .map(|c| Block::table(t, kappa, offset_coords(base, c))),
         );
-        count.extend(
-            table
-                .count_columns()
-                .iter()
-                .map(|&c| Block::table(t, kappa, vec![Coord::Col(base + c)])),
-        );
     }
+
+    let bits = multiplicity_bits(taus);
+    let producers = LOOKUPS
+        .into_iter()
+        .zip(bits)
+        .map(|(lookup, bits)| Producer {
+            kappa: lookup.log_rows(sizes),
+            coords: lookup_tuple(lookup, p),
+            col: lookup.multiplicity().col(),
+            bits,
+        })
+        .collect();
 
     let (placements, shape) = witness::placements_of(&column_sources(sizes, taus));
     Layout {
         push,
         pull,
-        count,
+        producers,
         placements,
         shape,
         taus,
@@ -393,13 +449,8 @@ pub fn layout(p: &rv::Program, taus: [usize; tables::N_TABLES], ts_final: F64) -
 }
 
 /// A framework block's two tuples, the push's and the pull's.
-fn framework_tuples(
-    block: Framework,
-    p: &rv::Program,
-    prog_cols: &[std::sync::Arc<Vec<F64>>; N_BYTECODE_COLUMNS],
-    ts_final: F64,
-) -> (Vec<Coord>, Vec<Coord>) {
-    use Coord::{Col, Const, IntIndex, Powers, Public, Sparse};
+fn framework_tuples(block: Framework, p: &rv::Program, ts_final: F64) -> (Vec<Coord>, Vec<Coord>) {
+    use Coord::{Col, Const, IntIndex, Sparse};
     let one = Const(F64::ONE);
     // A read-write array: every cell starts at timestamp g^0 holding `init`, and ends at
     // its last timestamp holding its final word (§sec:memchan).
@@ -409,12 +460,6 @@ fn framework_tuples(
             .chain(init)
             .collect();
         (seed, vec![Const(sep), cell, Col(ts.col()), Col(fin.col())])
-    };
-    // A read-only array: the tuple with its count, `1` before the run and the
-    // committed count after it.
-    let lookup = |head: [Coord; 2], tail: Vec<Coord>, count: Shared| {
-        let tuple = |c: Coord| head.iter().cloned().chain([c]).chain(tail.iter().cloned()).collect();
-        (tuple(one.clone()), tuple(Col(count.col())))
     };
     let word = |base: u64| IntIndex {
         base: F64(base),
@@ -463,40 +508,32 @@ fn framework_tuples(
             Shared::AdvTs,
             Shared::AdvFin,
         ),
+    }
+}
+
+/// A lookup array's entries, the tuple its producer pushes (§sec:lookup). None is
+/// committed: the program is public and the range arrays' addresses are geometric.
+fn lookup_tuple(lookup: Lookup, p: &rv::Program) -> Vec<Coord> {
+    use Coord::{Const, Powers};
+    match lookup {
         // Entry `i` at its `pc`; the program columns are public.
-        Framework::Bytecode => {
-            let pc = IntIndex {
-                base: F64(TEXT_BASE),
-                shift: 2,
-            };
-            let program = prog_cols.iter().cloned().map(Public).collect();
-            lookup([Const(SEP_BYTECODE), pc], program, Shared::BytecodeCount)
-        }
+        Lookup::Bytecode => bytecode_tuple(p),
         // The two range arrays (§sec:rangecheck): entries with no value, so a read is a
-        // range check on its address. Neither is committed: their addresses are
-        // geometric, `g^{j+1}` and `g^{-2^16·j}`.
-        Framework::RangeLo => {
-            let addresses = Powers {
+        // range check on its address, `g^{j+1}` and `g^{-2^16·j}`.
+        Lookup::RangeLo => vec![
+            Const(tables::SEP_RANGE_LO),
+            Powers {
                 first: tables::range_lo_first(),
                 ratio: F64::G,
-            };
-            lookup(
-                [Const(tables::SEP_RANGE_LO), addresses],
-                Vec::new(),
-                Shared::RangeLoCount,
-            )
-        }
-        Framework::RangeHi => {
-            let addresses = Powers {
+            },
+        ],
+        Lookup::RangeHi => vec![
+            Const(tables::SEP_RANGE_HI),
+            Powers {
                 first: F64::ONE,
                 ratio: tables::range_hi_ratio(),
-            };
-            lookup(
-                [Const(tables::SEP_RANGE_HI), addresses],
-                Vec::new(),
-                Shared::RangeHiCount,
-            )
-        }
+            },
+        ],
     }
 }
 
@@ -522,7 +559,7 @@ impl Program {
         let tr = &exec.trace;
         let sch = schema();
 
-        // The public layout (flush/count blocks, placements, boundary, taus) is a pure
+        // The public layout (flush blocks, producers, placements, boundary, taus) is a pure
         // function of the program and the announced sizes, with no committed witness;
         // reconstruct it here so the prover and verifier share exactly the same
         // structure. It comes before the fill because it fixes each table's height
@@ -594,10 +631,17 @@ impl Program {
             }
             // Every shared column has to be written: the stack is uninitialized, so one
             // left out would be read as indeterminate bytes rather than caught by a
-            // length mismatch.
+            // length mismatch. What the run did not leave, the multiplicities, is
+            // counted from its rows.
             for c in SHARED {
-                windows[c.col()].copy_from_slice(c.values(tr));
+                if let Some(values) = c.values(tr) {
+                    windows[c.col()].copy_from_slice(values);
+                }
             }
+            let [bc, lo, hi] = windows
+                .get_disjoint_mut(LOOKUPS.map(|lookup| lookup.multiplicity().col()))
+                .expect("three distinct columns");
+            count_reads(tr, [bc, lo, hi]);
         });
         // The classes' packed witnesses, one instance per row of their table.
         let reductions = crate::stage!("Build flock witnesses", || {
@@ -613,6 +657,26 @@ impl Program {
             layout: l,
             ts_final: tr.ts_final,
             reductions,
+        }
+    }
+}
+
+/// How often each entry of each lookup array is read, the bytecode's by every row and
+/// the range arrays' by every access, at its gap's two chunks: each entry's word is that
+/// count as an integer.
+fn count_reads(tr: &Trace, [bc, lo, hi]: [&mut [F64]; 3]) {
+    for column in [&mut *bc, &mut *lo, &mut *hi] {
+        column.fill(F64::ZERO);
+    }
+    let mask = (1u32 << tables::RANGE_LOG) - 1;
+    for (t, rows) in tr.rows.iter().enumerate() {
+        let n = tables::CLASSES[t].n_accesses();
+        for r in rows {
+            bc[r.index as usize].0 += 1;
+            for a in &r.accesses()[..n] {
+                lo[(a.gap & mask) as usize].0 += 1;
+                hi[(a.gap >> tables::RANGE_LOG) as usize].0 += 1;
+            }
         }
     }
 }
