@@ -8,6 +8,9 @@ use leanvm::{Prover, Rate};
 use std::error::Error;
 use std::path::PathBuf;
 
+#[global_allocator]
+static ALLOCATOR: bench::Jemalloc = bench::Jemalloc;
+
 mod aggregate;
 mod fibonacci;
 mod guest;
@@ -162,8 +165,5 @@ fn main() {
             cli.rate,
             plan,
         ),
-    }
-    if std::env::var_os("ZK_ALLOC_STATS").is_some() {
-        eprintln!("{}", zk_alloc::stats());
     }
 }

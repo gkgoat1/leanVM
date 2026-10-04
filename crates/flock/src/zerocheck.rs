@@ -35,7 +35,6 @@ use thiserror::Error;
 use univariate_skip_optimized::{
     c_s, medium_challenges, round1_shift_reduce_extract_c_packed_padded, small_challenges,
 };
-use zk_alloc::ArenaVec;
 
 pub mod bit_fold;
 pub mod multilinear;
@@ -278,9 +277,9 @@ pub fn prove_packed_padded(
     // SAFETY: a pass writes every slot of the prefix it hands on, and nothing reads past it.
     let (mut a_nxt, mut b_nxt, mut c_nxt) = unsafe {
         (
-            ArenaVec::<F192>::uninitialized(n_in / 2),
-            ArenaVec::<F192>::uninitialized(n_in / 2),
-            ArenaVec::<F192>::uninitialized(n_in / 2),
+            primitives::uninit_vec::<F192>(n_in / 2),
+            primitives::uninit_vec::<F192>(n_in / 2),
+            primitives::uninit_vec::<F192>(n_in / 2),
         )
     };
     while next < n_mlv {

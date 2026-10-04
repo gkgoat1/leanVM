@@ -1269,7 +1269,6 @@ mod tests {
     use fiat_shamir::transcript::{ProverState, VerifierState};
     use primitives::test_util::Rng;
     use std::collections::HashSet;
-    use zk_alloc::ArenaVec;
 
     /// Pack a logical Boolean witness vector into the lincheck `z_packed`
     /// stripe layout. The input `z_logical` is indexed linearly with
@@ -1278,7 +1277,7 @@ mod tests {
     /// `z[i_inner, 8·byte_idx + r]` for `r ∈ 0..8`, with bit `r` within the byte.
     ///
     /// See the module-level docs for the full bit-position decomposition.
-    fn pack_z_lincheck(z_logical: &[bool], m: usize, k_log: usize) -> ArenaVec<u8> {
+    fn pack_z_lincheck(z_logical: &[bool], m: usize, k_log: usize) -> Vec<u8> {
         let k = 1usize << k_log;
         let n_total = 1usize << m;
         assert_eq!(z_logical.len(), n_total);
@@ -1286,7 +1285,8 @@ mod tests {
         assert_eq!(n_outer % 8, 0, "need n_outer ≥ 8 for byte stripes");
         let n_stripes = n_outer / 8;
 
-        let mut z_packed = zk_alloc::alloc_uninit(n_total / 8);
+        let mut z_packed = Vec::with_capacity(n_total / 8);
+        let slots = &mut z_packed.spare_capacity_mut()[..n_total / 8];
         for byte_idx in 0..n_stripes {
             for i_inner in 0..k {
                 let mut byte = 0u8;
@@ -1297,11 +1297,12 @@ mod tests {
                         byte |= 1u8 << r;
                     }
                 }
-                z_packed[byte_idx * k + i_inner].write(byte);
+                slots[byte_idx * k + i_inner].write(byte);
             }
         }
         // SAFETY: the nested loops write every output byte exactly once.
-        unsafe { zk_alloc::assume_init(z_packed) }
+        unsafe { z_packed.set_len(n_total / 8) };
+        z_packed
     }
 
     /// Partial fold of `z` at the outer half of a claim point, single-matrix,

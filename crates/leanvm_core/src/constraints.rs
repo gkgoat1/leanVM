@@ -37,10 +37,9 @@ use crate::colval::ColVal;
 use fiat_shamir::transcript::{Challenger, ProverState, TranscriptError, Transmitter, VerifierState};
 use parallel::Chunks;
 use primitives::field::{F64, F192, F192Unreduced};
-use primitives::multilinear::{eq_table_arena, poly_eval, shrink_eq_high};
+use primitives::multilinear::{eq_table, poly_eval, shrink_eq_high};
 use std::ops::Deref;
 use thiserror::Error;
-use zk_alloc::ArenaVec;
 
 /// One table's sent columns' evaluations at its table-sumcheck point.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,7 +143,7 @@ pub struct Air<S> {
 /// into `E` on the round the table joins, or `E`-valued from the start.
 pub enum Columns<'a> {
     K(Vec<&'a [F64]>),
-    E(Vec<ArenaVec<F192>>),
+    E(Vec<Vec<F192>>),
 }
 
 /// Start of each table's disjoint range of `η`-powers.
@@ -160,9 +159,9 @@ pub fn xi_offsets(n_constraints: impl Iterator<Item = usize>) -> Vec<usize> {
 
 /// An active round: one endpoint evaluation and the quadratic coefficient.
 ///
-/// Generic twice over: in the column element, `K` before a table's columns are
-/// folded and `E` after ([`ColVal`]), and in the container, `Vec` for the former
-/// and `ArenaVec` for the latter. `#[inline(always)]` matters here, on this and on
+/// Generic in the column element: `K` before a table's columns are folded, `E` after.
+///
+/// `#[inline(always)]` matters here, on this and on
 /// every `ColVal` method: this is the body of the constraint sumcheck's innermost
 /// loop, and without it the generic stops inlining and costs measurable prover
 /// time. Nothing is lifted into `E`, so a `K` round evaluates the identity and the
@@ -234,11 +233,11 @@ pub fn prove<S: Summand>(
     let n = airs.iter().map(|a| a.tau).max().unwrap_or(0);
     debug_assert!(zeta.len() >= n, "the eq point must cover the tallest table");
     let mut weights = vec![F192::ONE; airs.len()];
-    let mut eqr = eq_table_arena(&zeta[..n.saturating_sub(1)]);
+    let mut eqr = eq_table(&zeta[..n.saturating_sub(1)]);
     let mut chi = vec![F192::ZERO; n];
     // Borrow the committed columns until their joining round, then retain only folded rows.
     let mut pending: Vec<Option<Columns<'_>>> = cols.into_iter().map(Some).collect();
-    let mut folded: Vec<Option<ArenaVec<F192>>> = (0..airs.len()).map(|_| None).collect();
+    let mut folded: Vec<Option<Vec<F192>>> = (0..airs.len()).map(|_| None).collect();
     let mut messages = vec![None; airs.len()];
     let mut k = F192::ONE;
     let mut claim = sigma.iter().copied().fold(F192::ZERO, |a, b| a + b);
@@ -364,11 +363,11 @@ fn fold_columns_and_message<T: ColVal + Into<F192>, C: Deref<Target = [T]> + Syn
     summand: &impl Summand,
     eqr: &[F192],
     at_one: bool,
-) -> (ArenaVec<F192>, Option<[F192; 2]>) {
+) -> (Vec<F192>, Option<[F192; 2]>) {
     let ncols = cols.len();
     let half = cols[0].len() / 2;
     // SAFETY: the single-row branch or the paired-row dispatch writes every output element.
-    let mut out = unsafe { ArenaVec::uninitialized(half * ncols) };
+    let mut out = unsafe { primitives::uninit_vec(half * ncols) };
     let interp = |a: T, b: T| a.into() + (a + b).mul_e(rk);
     if half == 1 {
         // No next variable remains, so only the final evaluations are needed.
@@ -397,7 +396,7 @@ fn fold_columns_and_message<T: ColVal + Into<F192>, C: Deref<Target = [T]> + Syn
 
 /// Fold row-major storage in place while building the next round's message from scratch.
 fn fold_rows_and_message(
-    table: &mut ArenaVec<F192>,
+    table: &mut Vec<F192>,
     ncols: usize,
     rk: F192,
     summand: &impl Summand,
@@ -565,7 +564,7 @@ mod tests {
         debug_assert!(zeta.len() >= n, "the eq point must cover the tallest table");
         // Each table carries its own accumulated equality and waiting-variable factors.
         let mut weights = vec![F192::ONE; airs.len()];
-        let mut eqr = eq_table_arena(&zeta[..n.saturating_sub(1)]);
+        let mut eqr = eq_table(&zeta[..n.saturating_sub(1)]);
         let mut chi = vec![F192::ZERO; n];
         // Extension columns are already owned; base columns stay borrowed until joining.
         let (cols, mut folded): (Vec<Vec<&[F64]>>, Vec<_>) = cols
@@ -678,7 +677,7 @@ mod tests {
                 attached: true,
                 constant: F192::ONE,
             };
-            let eq = eq_table_arena(&[F192::new(11, 13, 17), F192::new(19, 23, 29)]);
+            let eq = eq_table(&[F192::new(11, 13, 17), F192::new(19, 23, 29)]);
             let full_eval = |r| {
                 (0..4).fold(F192::ZERO, |sum, i| {
                     let v: Vec<_> = cols
@@ -790,7 +789,7 @@ mod tests {
             // Both oracles receive fresh extension buffers and identical borrowed base values.
             let views = || columns.iter().enumerate().map(|(t, c)| {
                 if kinds >> t & 1 == 0 { Columns::K(base[t].iter().map(|c| &c[..]).collect()) }
-                else { Columns::E(c.iter().map(|c| ArenaVec::from_slice(c)).collect()) }
+                else { Columns::E(c.iter().map(|c| c.to_vec()).collect()) }
             }).collect();
             // Identical transcript seeds expose any changed message or challenge.
             let mut original = ProverState::from_label(b"arbitrary-constraint-test");
@@ -821,9 +820,7 @@ mod tests {
                                     Columns::E(
                                         table
                                             .iter()
-                                            .map(|c| {
-                                                ArenaVec::from_iter(c.iter().map(|&v| F192::new(v.0, 3 * v.0, 7 * v.0)))
-                                            })
+                                            .map(|c| c.iter().map(|&v| F192::new(v.0, 3 * v.0, 7 * v.0)).collect())
                                             .collect(),
                                     )
                                 } else {

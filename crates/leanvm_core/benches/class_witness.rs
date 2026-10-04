@@ -8,6 +8,9 @@ use bench::Plan;
 use leanvm_core::tables::ClassSpec;
 use primitives::test_util::Rng;
 
+#[global_allocator]
+static ALLOCATOR: bench::Jemalloc = bench::Jemalloc;
+
 fn main() {
     // One batch of 2^16 instances per class, the size of a mid-sized run's table.
     let n_log = bench::env_usize("WITNESS_N_LOG", 16);
@@ -28,15 +31,12 @@ fn main() {
             .map(|_| (0..circuit.n_input_words()).map(|_| rng.next_u64()).collect())
             .collect();
 
-        // Each pass is one proof's worth of arena, reclaimed by the next.
         let (_, walk) = plan.warm_then_measure(|_| {
-            let _phase = zk_alloc::enter_phase();
             circuit.generate_witness_with(&rows, &rows[0], n_log, |row, z, az, bz| {
                 circuit.witness_instance(row, z, az, bz);
             });
         });
         let (_, sliced) = plan.warm_then_measure(|_| {
-            let _phase = zk_alloc::enter_phase();
             circuit.generate_witness_from(&rows, &rows[0], n_log, |row, words| words.copy_from_slice(row));
         });
 

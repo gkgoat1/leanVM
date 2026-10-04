@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn fibonacci() {
-        let prover = Prover::without_arena();
+        let prover = Prover::new();
         super::run_fibonacci(200_000, &prover, Rate::MIN, Plan::default());
     }
 }

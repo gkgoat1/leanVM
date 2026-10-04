@@ -429,7 +429,6 @@ mod tests {
     use fiat_shamir::transcript::{Proof, ProverState, VerifierState};
     use primitives::test_util::Rng;
     use std::collections::HashSet;
-    use zk_alloc::ArenaVec;
 
     /// Compute `rs_eq_ind`, the transparent E-valued weight vector over the
     /// suffix domain: `rs_eq_ind[y] = Phi(suffix_tensor[y])` where `Phi` sends
@@ -766,7 +765,7 @@ mod tests {
             &pc,
             log_n,
             &packed,
-            ArenaVec::from_slice(&rs_eq_ind),
+            rs_eq_ind.to_vec(),
             sumcheck_claim,
             &pd.codeword,
             &pd.merkle_tree,
