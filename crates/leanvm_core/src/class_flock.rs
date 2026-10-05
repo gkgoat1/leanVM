@@ -19,7 +19,7 @@ use ::pcs::pack::LOG_PACKING;
 use fiat_shamir::transcript::{ProverState, VerifierState};
 use flock::circuit::Circuit;
 use flock::lincheck::MatrixClaim;
-use flock::reduction::{ReductionReplay, Shape, SliceClaim};
+use flock::reduction::{Instance, ReductionReplay, Shape, SliceClaim};
 use flock::verifier::FlockError;
 use primitives::field::F64;
 use std::sync::OnceLock;
@@ -240,27 +240,36 @@ impl Prepared {
             z_lincheck,
         }
     }
-
-    /// Flock's zerocheck then lincheck, leaving the one claim on the committed column.
-    pub(crate) fn prove(&self, ps: &mut ProverState) -> SliceClaim {
-        let block = circuit(self.flock).block();
-        let stage = block.prove_zerocheck(self.n_blocks_log, &self.z, &self.a, &self.b, ps);
-        block.prove_lincheck(self.n_blocks_log, stage, &self.z_lincheck, ps)
-    }
 }
 
-/// The verifier's replay of packed witness `f`'s reduction, zerocheck then lincheck, up to the circuit's matrices.
+/// Flock's batched zerocheck then lincheck over every packed witness, every class
+/// circuit then every clock circuit, leaving one claim on each committed column.
+pub(crate) fn prove_reductions(batches: &[Prepared], ps: &mut ProverState) -> Vec<SliceClaim> {
+    let instances: Vec<Instance<'_>> = (batches.iter())
+        .map(|p| Instance {
+            block: circuit(p.flock).block(),
+            n_blocks_log: p.n_blocks_log,
+            z: &p.z,
+            a: &p.a,
+            b: &p.b,
+            z_lincheck: &p.z_lincheck,
+        })
+        .collect();
+    flock::reduction::prove(&instances, ps)
+}
+
+/// The verifier's replay of the batched reductions, zerocheck then lincheck, up to the circuits' matrices, packed witness `f`'s batch being `2^n_blocks_log[f]` instances.
 ///
-/// Their form is left as a claim for the built circuit to settle.
-/// It reads only the circuit's shape, and builds none.
+/// Each circuit's form is left as a claim for the built circuit to settle.
+/// It reads only the circuits' shapes, and builds none.
 ///
 /// # Errors
 ///
 /// Returns the first stage that refuses the proof.
-pub fn verify_reduction(
-    f: usize,
-    n_blocks_log: usize,
+pub fn verify_reductions(
+    n_blocks_log: &[usize; N_FLOCKS],
     vs: &mut VerifierState,
-) -> Result<(ReductionReplay, MatrixClaim), FlockError> {
-    shape(f).verify_deferred(n_blocks_log, vs)
+) -> Result<Vec<(ReductionReplay, MatrixClaim)>, FlockError> {
+    let circuits: Vec<(Shape, usize)> = (0..N_FLOCKS).map(|f| (shape(f), n_blocks_log[f])).collect();
+    flock::reduction::verify_deferred(&circuits, vs)
 }

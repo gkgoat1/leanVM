@@ -1378,22 +1378,29 @@ class ZerocheckResult:
     v_c: E
 
 
-def verify_flock_zerocheck(log_n: int, transcript: Transcript) -> ZerocheckResult:
-    """The zerocheck: one univariate skip round, then nflock quadratic ones.
-    C rides those rounds with AB, so all three claims come out at one point."""
-    # The point r: seven fixed coordinates, the rest sampled.
-    r = (*FIXED_CHALLENGES, *transcript.samples(log_n - FLOCK_K_SKIP - len(FIXED_CHALLENGES)))
+def verify_flock_zerocheck(log_sizes: Sequence[int], transcript: Transcript) -> list[ZerocheckResult]:
+    """The zerocheck of every circuit at once, under shared challenges: one univariate skip round, then quadratic
+    rounds on the batch, circuit f weighted by lambda^f. C rides those rounds with AB, so each circuit's three claims
+    come out at one point: z_skip and the first log_size - k_skip round challenges. A circuit done before a round adds
+    the value it ended on, which the round's claim alone carries."""
+    n_rounds = max(log_sizes) - FLOCK_K_SKIP
+    # The point r: seven fixed coordinates, the rest sampled; circuit f uses its first log_size - k_skip.
+    r = (*FIXED_CHALLENGES, *transcript.samples(n_rounds - len(FIXED_CHALLENGES)))
+    lambdas = powers(transcript.sample(), len(log_sizes))
 
-    # P = P^AB + P^C on the coset, then z_skip; the 64 zeros on Lambda are assumed.
+    # sum_f lambda^f P_f on the coset, then z_skip; the 64 zeros on Lambda are assumed.
     p_coset = transcript.next_scalars(K_BITS)
     z_skip = transcript.sample()
     v_p = interpolate_zero_on_skip(p_coset, z_skip)
 
-    # nflock quadratic rounds on P, closed by v_a, v_b.
+    # The quadratic rounds on the batch, closed by every circuit's v_a, v_b, v_c.
     chi, running = sumcheck(transcript, v_p, 3, r)
-    v_a, v_b = transcript.next_scalars(2)
-    v_c = running + v_a * v_b
-    return ZerocheckResult(z_skip, chi, v_a, v_b, v_c)
+    results = []
+    for log_size in log_sizes:
+        v_a, v_b, v_c = transcript.next_scalars(3)
+        results.append(ZerocheckResult(z_skip, chi[: log_size - FLOCK_K_SKIP], v_a, v_b, v_c))
+    require(dot(lambdas, [zc.v_a * zc.v_b + zc.v_c for zc in results]) == running, "Flock zerocheck terminal mismatch")
+    return results
 
 
 @dataclass(frozen=True)
@@ -1425,30 +1432,38 @@ class MatrixForm:
 
 
 def verify_flock_lincheck(
-    circuit: FlockCircuit, zc: ZerocheckResult, transcript: Transcript
-) -> tuple[MultilinearPoint, tuple[E, ...], MatrixForm, E]:
-    """Lincheck at the quirky point (z_skip, chi): the claim's point, then its 64 slices s, then the circuit's matrix
-    form and the value the terminal identity needs it to take."""
-    n_rounds = circuit.log_size - FLOCK_K_SKIP
-    alpha = transcript.sample()  # batches the two matrix identities, the c claim and the constant-position claim
-    skip_weights = lagrange_weights(K_BITS, zc.z_skip)
-    chi_in = zc.chi[:n_rounds]
+    circuits: Sequence[FlockCircuit], zerochecks: Sequence[ZerocheckResult], transcript: Transcript
+) -> list[tuple[MultilinearPoint, tuple[E, ...], MatrixForm, E]]:
+    """Lincheck for every circuit under one alpha and one sumcheck, circuit f's identity weighted by alpha^(4f). Its
+    rounds bind each circuit's high column coordinates, top first, every circuit from the first round; a circuit done
+    before a round carries the line its lifting variable makes. Per circuit: its claim's point, then its 64 slices s,
+    then the circuit's matrix form and the value the prover sends for it, which the terminal identity needs it to take."""
+    alpha = transcript.sample()  # batches the two matrix identities, the c claim and the constant-position claim, and the circuits
+    weights = powers(alpha**4, len(circuits))
+    rounds = [circuit.log_size - FLOCK_K_SKIP for circuit in circuits]
+    claim = dot(weights, [zc.v_a + alpha * zc.v_b + alpha**2 * zc.v_c + alpha**3 for zc in zerochecks])
+    round_challenges, r_lc = sumcheck(transcript, claim, 3, [None] * max(rounds))
 
-    # The rounds that bind the high column coordinates (8 for BLAKE2s), leaving 64 unfolded.
-    claim = zc.v_a + alpha * zc.v_b + alpha**2 * zc.v_c + alpha**3
-    round_challenges, r_lc = sumcheck(transcript, claim, 3, [None] * n_rounds)
-
-    # The residual, then the terminal identity, of which the matrix form is left to the circuit: what remains is the
-    # c term and the pin term. C = I, so the c weight is e_row itself, and both sides being tensors it collapses to
-    # eq(chi_in, chi_in_prime) times a 64-term Lagrange combination; the pin's column weight is its slice times the eq
-    # weight of its slot.
-    s = tuple(transcript.next_scalars(K_BITS))
-    chi_in_prime = tuple(reversed(round_challenges))
-    pin = circuit.constant_column
-    value = (
-        r_lc + alpha**2 * eq_eval(chi_in, chi_in_prime) * dot(skip_weights, s) + alpha**3 * s[pin % K_BITS] * eq_kernel(chi_in_prime)[pin // K_BITS]
-    )
-    return chi_in_prime + zc.chi[n_rounds:], s, MatrixForm(alpha, zc.z_skip, chi_in, chi_in_prime, s), value
+    # Every residual and its matrix form's value, then the terminal identity: each circuit's form, c term and pin term.
+    # C = I, so the c weight is e_row itself, and both sides being tensors it collapses to eq(chi_in, chi_in_prime)
+    # times a 64-term Lagrange combination; the pin's column weight is its slice times the eq weight of its slot.
+    terminal = ZERO
+    results = []
+    for circuit, zc, n_rounds, weight in zip(circuits, zerochecks, rounds, weights, strict=True):
+        s = tuple(transcript.next_scalars(K_BITS))
+        value = transcript.next_scalar()
+        chi_in = zc.chi[:n_rounds]
+        chi_in_prime = tuple(reversed(round_challenges[:n_rounds]))
+        pin = circuit.constant_column
+        own = (
+            value
+            + alpha**2 * eq_eval(chi_in, chi_in_prime) * dot(lagrange_weights(K_BITS, zc.z_skip), s)
+            + alpha**3 * s[pin % K_BITS] * eq_kernel(chi_in_prime)[pin // K_BITS]
+        )
+        terminal += reduce(mul, round_challenges[n_rounds:], weight) * own
+        results.append((chi_in_prime + zc.chi[n_rounds:], s, MatrixForm(alpha, zc.z_skip, chi_in, chi_in_prime, s), value))
+    require(terminal == r_lc, "Flock lincheck terminal mismatch")
+    return results
 
 
 # The class circuits ----------------------------------------------------------
@@ -2124,11 +2139,12 @@ def build_layout(
     )
 
 
-def verify_flock(circuit: FlockCircuit, log_height: int, transcript: Transcript) -> tuple[MultilinearPoint, tuple[E, ...], MatrixForm, E]:
-    """The reduction in protocol order: zerocheck, then lincheck. What it leaves is the point and the 64 claims
-    s[i] = z(i, point), i < 64, for ring switching to bind, and the matrix form with the value it must take."""
-    zc = verify_flock_zerocheck(circuit.log_size + log_height, transcript)
-    return verify_flock_lincheck(circuit, zc, transcript)
+def verify_flock(circuits: Sequence[tuple[FlockCircuit, int]], transcript: Transcript) -> list[tuple[MultilinearPoint, tuple[E, ...], MatrixForm, E]]:
+    """The reductions of every circuit, each over 2^log_height instances, in protocol order: the batched zerocheck,
+    then the batched lincheck. What they leave, per circuit, is the point and the 64 claims s[i] = z(i, point), i < 64,
+    for ring switching to bind, and the matrix form with the value it must take."""
+    zerochecks = verify_flock_zerocheck([circuit.log_size + log_height for circuit, log_height in circuits], transcript)
+    return verify_flock_lincheck([circuit for circuit, _ in circuits], zerochecks, transcript)
 
 
 # Ring switching --------------------------------------------------------------
@@ -2300,7 +2316,7 @@ def verify_core(
     check_bytecode(bytecode)
     # Everything public and fixed is one digest, which seeds the transcript; every variable-length part is length-framed.
     halt_pc = TEXT_BASE + 4 * (len(bytecode) // 2**BUS_BITS - 1)
-    preimage = b"leanvm-rv64im-8" + pack("<Q", len(bytecode)) + b"".join(word.to_bytes() for word in bytecode)
+    preimage = b"leanvm-rv64im-9" + pack("<Q", len(bytecode)) + b"".join(word.to_bytes() for word in bytecode)
     preimage += pack("<5Q", entry_pc, halt_pc, log_ram, log_advice, len(image)) + pack(f"<{len(image)}Q", *image)
     transcript = Transcript(proof, blake2s_hash(preimage), [K(word) for word in output])
 
@@ -2354,9 +2370,9 @@ def verify_core(
         point = tuple(ONE if register >> bit & 1 else ZERO for bit in range(LOG_REGISTERS))
         claims.append(ColumnClaim(SHARED["register_final"], point, E(value)))
 
-    # 6] each circuit via Flock, every class circuit then every table's clock circuit, each over its own packed
-    # witness, each leaving its matrix form to its circuit
-    flocks = [verify_flock(circuit, layout.table_log_heights[table.opcode], transcript) for table, circuit, _ in FLOCKS]
+    # 6] every circuit via Flock, every class circuit then every table's clock circuit, each over its own packed
+    # witness, batched under shared challenges, each leaving its matrix form to its circuit
+    flocks = verify_flock([(circuit, layout.table_log_heights[table.opcode]) for table, circuit, _ in FLOCKS], transcript)
     families = [(point, s) for point, s, _, _ in flocks]
     # and the producer's bits, the 64 bit slices of its multiplicity column: the bits the bus reads, then zeros
     families += [(point, (*values, *[ZERO] * (K_BITS - len(values)))) for point, values in tables.families]

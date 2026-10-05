@@ -665,22 +665,30 @@ fn the_dense_reduction_reduces_to_the_polynomials() {
     assert!(falsified.count() > 0, "a false claim reduced to true values");
 }
 
-// Each circuit's matrices at random points: a lincheck claim and both carried claims, on three circuits.
+// Each circuit's matrices at random points: lincheck claims and both carried claims, on three circuits.
+//
+// The lincheck claims share their points as one batch leaves them: one alpha and one skip point, the other coordinates
+// prefixes of shared ones; circuit 0 has a second claim at its first's point with other slices.
 fn matrix_claims(rng: &mut Rng) -> Vec<MatrixClaim<F192>> {
     let k_skip = flock::zerocheck::K_SKIP;
+    let (alpha, z_skip) = (rng.ext(), rng.ext());
+    let (x, r) = (rng.ext_vec(16), rng.ext_vec(16));
     let mut claims = Vec::new();
-    for f in [0, 3, HashFlock::index()] {
+    for (i, f) in [0, 0, 3, HashFlock::index()].into_iter().enumerate() {
         let circuit = crate::class_flock::circuit(f);
         let k = circuit.k_log();
         let form = MatrixForm {
-            alpha: rng.ext(),
-            z_skip: rng.ext(),
-            x_inner_rest: rng.ext_vec(k - k_skip),
-            r_inner_rest: rng.ext_vec(k - k_skip),
+            alpha,
+            z_skip,
+            x_inner_rest: x[..k - k_skip].to_vec(),
+            r_inner_rest: r[..k - k_skip].to_vec(),
             s_hat_v: rng.ext_vec(1 << k_skip),
         };
         let value = form.evaluate(circuit);
         claims.push(MatrixClaim::fresh(f, &Claim { point: form, value }));
+        if i == 0 {
+            continue;
+        }
         let (rows, cols) = (rng.ext_vec(k), rng.ext_vec(k));
         let (ra, rb) = circuit.row_values(&eq_table(&cols));
         let u = eq_table(&rows);

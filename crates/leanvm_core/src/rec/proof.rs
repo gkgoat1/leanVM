@@ -63,12 +63,18 @@ impl HashBatch {
         }
     }
 
-    /// Prove every hash row: zerocheck, then lincheck, to one ring-switched claim on the packed witness.
+    /// Prove every hash row: zerocheck, then lincheck, a batch of one circuit, to one ring-switched claim on the packed witness.
     fn prove(self, layout: &RecLayout, ps: &mut ProverState) -> RingSwitchOpen {
-        let block = HashFlock::circuit().block();
         let window = layout.hash_window();
-        let stage = block.prove_zerocheck(self.tau, &self.z, &self.a, &self.b, ps);
-        let reduced = block.prove_lincheck(self.tau, stage, &self.z_lincheck, ps);
+        let instance = flock::reduction::Instance {
+            block: HashFlock::circuit().block(),
+            n_blocks_log: self.tau,
+            z: &self.z,
+            a: &self.a,
+            b: &self.b,
+            z_lincheck: &self.z_lincheck,
+        };
+        let [reduced] = <[_; 1]>::try_from(flock::reduction::prove(&[instance], ps)).expect("one circuit");
         flock::reduction::ring_switch_open(window.n_vars, window.offset, &reduced)
     }
 
@@ -76,7 +82,8 @@ impl HashBatch {
     ///
     /// The rows' matrices are settled here, against the circuit.
     fn verify(layout: &RecLayout, vs: &mut VerifierState) -> Result<SliceClaim, RecError> {
-        let replay = HashFlock::circuit().block().verify(layout.tau(Table::Hash), vs)?;
+        let circuits = [(HashFlock::circuit().block(), layout.tau(Table::Hash))];
+        let [replay] = <[_; 1]>::try_from(flock::reduction::verify(&circuits, vs)?).expect("one circuit");
         Ok(replay.claim)
     }
 }
