@@ -97,6 +97,11 @@ impl Witness {
 
             // What the run did not leave, the multiplicities, is counted from its rows.
             trace.count_reads(windows[Lookup::Bytecode.multiplicity().col()]);
+
+            // The tables' register numbers, packed into their words.
+            for word in &layout.registers {
+                word.pack(&mut windows);
+            }
         });
 
         // The packed witnesses, one instance per row of their table.
