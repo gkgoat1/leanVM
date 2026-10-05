@@ -76,10 +76,9 @@ LAYER_CURSOR = 2
 LAYER_PUSH = 3
 LAYER_PULL = 4
 LAYER_COUNT = 5
-LAYER_LAMBDA = 6
-LAYER_ROW = 7
-LAYER_POS = 8
-LAYER_SLOTS = 9
+LAYER_ROW = 6
+LAYER_POS = 7
+LAYER_SLOTS = 8
 # One OOD sample of a WHIR level.
 OOD_BETA = 0
 OOD_Y = 1
@@ -1328,10 +1327,10 @@ def verify_bus_gkr(fs0, fs1, cursor, g_bus_mu, zeta):
     # ONE GKR grand product over push, pull and count, RLC-batched. Push and pull
     # have equal depth (matched blocks) and the count tree is padded with identity
     # leaves up to it (product unchanged), so a single sumcheck serves all three.
-    # Radix four contracts two binary levels per layer; after checking the combined
-    # product identity, a fresh λ pins the individual values. All three trees reduce
-    # to the one shared point `zeta`, which this fills, returning their three leaf
-    # values with the walked Fiat-Shamir state and stream cursor.
+    # Radix four contracts two binary levels per layer, each batched by a fresh λ
+    # squeezed at its start. All three trees reduce to the one shared point `zeta`,
+    # which this fills, returning their three leaf values with the walked
+    # Fiat-Shamir state and stream cursor.
     layers = HeapBuf((g_bus_mu * GEN ** 2) ** LAYER_SLOTS)  # mu + 2 layers
     rounds = HeapBuf(GKR_ROUNDS_CAP * ROUND_SLOTS)
     gkr_pts = HeapBuf(GKR_POINTS_CAP)
@@ -1341,14 +1340,12 @@ def verify_bus_gkr(fs0, fs1, cursor, g_bus_mu, zeta):
     root_pull = root_push
     fs, root_count, cursor = fs_next(fs, cursor)
     assert root_count != 0  # count-tree root nonzero: no read count self-cancels
-    fs, root_lambda = squeeze(fs)
     layers[GEN ** LAYER_FS0] = fs[0]
     layers[GEN ** LAYER_FS1] = fs[1]
     layers[GEN ** LAYER_CURSOR] = cursor
     layers[GEN ** LAYER_PUSH] = root_push
     layers[GEN ** LAYER_PULL] = root_pull
     layers[GEN ** LAYER_COUNT] = root_count
-    layers[GEN ** LAYER_LAMBDA] = root_lambda  # λ over the three roots
     layers[GEN ** LAYER_ROW] = gkr_pts
     layers[GEN ** LAYER_POS] = GEN ** 0
 
@@ -1364,8 +1361,8 @@ def verify_bus_gkr(fs0, fs1, cursor, g_bus_mu, zeta):
     if depth_shift[g_bus_mu] != 1:
         # The odd layer is layer 0, so its round state would be written and read
         # back at the same position: read it straight off the layer instead.
-        lam = layers[GEN ** LAYER_LAMBDA]
         tail_fs = [layers[GEN ** LAYER_FS0], layers[GEN ** LAYER_FS1]]
+        tail_fs, lam = squeeze(tail_fs)
         tcur = layers[GEN ** LAYER_CURSOR]
         tclaim = layers[GEN ** LAYER_PUSH] + lam * (layers[GEN ** LAYER_PULL] + lam * layers[GEN ** LAYER_COUNT])
         nextrow = layers[GEN ** LAYER_ROW] * GEN ** MU_CAP
@@ -1380,27 +1377,26 @@ def verify_bus_gkr(fs0, fs1, cursor, g_bus_mu, zeta):
         assert tclaim == combined
         tail_fs, c0 = squeeze(tail_fs)
         nextrow[GEN ** 0] = c0
-        tail_fs, tail_lambda = squeeze(tail_fs)  # fresh λ pins the tail individuals
         nxt = layers * GEN ** LAYER_SLOTS
         nxt[GEN ** LAYER_FS0] = tail_fs[0]
         nxt[GEN ** LAYER_FS1] = tail_fs[1]
         nxt[GEN ** LAYER_CURSOR] = tcur
         for side in unroll(0, N_GKR_SIDES):
             nxt[GEN ** (LAYER_PUSH + side)] = evals[2 * side] + c0 * (evals[2 * side] + evals[2 * side + 1])
-        nxt[GEN ** LAYER_LAMBDA] = tail_lambda
         nxt[GEN ** LAYER_ROW] = nextrow
         nxt[GEN ** LAYER_POS] = GEN
 
     for x_pair in mul_range(1, pair_bounds[g_bus_mu]):
         x_layer = x_pair * x_pair * depth_shift[g_bus_mu]
         layer = layers * x_layer ** LAYER_SLOTS
-        lam = layer[GEN ** LAYER_LAMBDA]
+        layer_fs = [layer[GEN ** LAYER_FS0], layer[GEN ** LAYER_FS1]]
+        layer_fs, lam = squeeze(layer_fs)
         point_row = layer[GEN ** LAYER_ROW]
         round_pos = layer[GEN ** LAYER_POS]
         nextrow = point_row * GEN ** MU_CAP
         head = rounds * round_pos ** ROUND_SLOTS
-        head[GEN ** ROUND_FS0] = layer[GEN ** LAYER_FS0]
-        head[GEN ** ROUND_FS1] = layer[GEN ** LAYER_FS1]
+        head[GEN ** ROUND_FS0] = layer_fs[0]
+        head[GEN ** ROUND_FS1] = layer_fs[1]
         head[GEN ** ROUND_CURSOR] = layer[GEN ** LAYER_CURSOR]
         head[GEN ** ROUND_CLAIM] = layer[GEN ** LAYER_PUSH] + lam * (layer[GEN ** LAYER_PULL] + lam * layer[GEN ** LAYER_COUNT])
         for x_round in mul_range(1, x_layer):
@@ -1429,7 +1425,6 @@ def verify_bus_gkr(fs0, fs1, cursor, g_bus_mu, zeta):
         tail_fs, c1 = squeeze(tail_fs)
         nextrow[GEN ** 0] = c0
         nextrow[GEN ** 1] = c1
-        tail_fs, tail_lambda = squeeze(tail_fs)
         nxt = layer * GEN ** (2 * LAYER_SLOTS)
         nxt[GEN ** LAYER_FS0] = tail_fs[0]
         nxt[GEN ** LAYER_FS1] = tail_fs[1]
@@ -1438,7 +1433,6 @@ def verify_bus_gkr(fs0, fs1, cursor, g_bus_mu, zeta):
             lo = evals[4 * side] + c0 * (evals[4 * side] + evals[4 * side + 1])
             hi = evals[4 * side + 2] + c0 * (evals[4 * side + 2] + evals[4 * side + 3])
             nxt[GEN ** (LAYER_PUSH + side)] = lo + c1 * (lo + hi)
-        nxt[GEN ** LAYER_LAMBDA] = tail_lambda
         nxt[GEN ** LAYER_ROW] = nextrow
         nxt[GEN ** LAYER_POS] = round_pos * x_layer * GEN
     last = layers * g_bus_mu ** LAYER_SLOTS

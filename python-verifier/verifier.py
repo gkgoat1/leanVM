@@ -431,7 +431,6 @@ def sumcheck(transcript: Transcript, claim: E, count: int, equalities: Sequence[
 
 def verify_gkr_grand_products(depth: int, transcript: Transcript) -> tuple[E, MultilinearPoint, tuple[E, E, E]]:
     shared, count = transcript.next_scalar(), transcript.next_scalar()
-    combiner = transcript.sample()
     point: list[E] = []
     values = (shared, shared, count)  # 3 grand product GKR are batched together: push, pull, count
 
@@ -439,6 +438,7 @@ def verify_gkr_grand_products(depth: int, transcript: Transcript) -> tuple[E, Mu
     while layer > 0:
         # Two levels a step. An odd depth starts with one.
         step = 1 if layer % 2 else 2
+        combiner = transcript.sample()
         claim = poly_eval(values, combiner)
         # The product is degree 2^step, so one more coefficient than that per round.
         x, claim = sumcheck(transcript, claim, 2**step + 1, point)
@@ -449,7 +449,6 @@ def verify_gkr_grand_products(depth: int, transcript: Transcript) -> tuple[E, Mu
 
         y = transcript.samples(step)
         values = [multilinear_eval(child, y) for child in children]
-        combiner = transcript.sample()
         point = [*y, *x]
         layer -= step
 

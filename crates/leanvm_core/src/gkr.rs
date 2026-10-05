@@ -335,12 +335,12 @@ pub fn prove_product_triple(leaves: [Vec<F192>; 3], ps: &mut ProverState, shape:
             ps.add_scalar(roots[2]);
         }
     }
-    let mut lambda = ps.sample();
     let mut point = Vec::new();
     let mut values = roots;
 
     let mut layer = mu;
     while layer > 0 {
+        let lambda = ps.sample();
         let round_count = mu - layer;
         if layer % 2 == 1 {
             debug_assert_eq!(round_count, 0, "only the root-most layer may be binary");
@@ -359,7 +359,6 @@ pub fn prove_product_triple(leaves: [Vec<F192>; 3], ps: &mut ProverState, shape:
             for (value, [left, right]) in values.iter_mut().zip(tails) {
                 *value = interp(left, right, challenge);
             }
-            lambda = ps.sample();
             point = vec![challenge];
             layer -= 1;
             continue;
@@ -416,7 +415,6 @@ pub fn prove_product_triple(leaves: [Vec<F192>; 3], ps: &mut ProverState, shape:
                 high_challenge,
             );
         }
-        lambda = ps.sample();
         point = vec![low_challenge, high_challenge];
         point.extend_from_slice(&round_point);
         layer -= 2;
@@ -437,12 +435,12 @@ pub fn verify_product_triple(mu: usize, vs: &mut VerifierState, shape: RootShape
             [shared, shared, root()?]
         }
     };
-    let mut lambda = vs.sample();
     let mut point = Vec::new();
     let mut values = roots;
 
     let mut layer = mu;
     while layer > 0 {
+        let lambda = vs.sample();
         let round_count = mu - layer;
         let mut claim = poly_eval(&values, lambda);
         if layer % 2 == 1 {
@@ -459,7 +457,6 @@ pub fn verify_product_triple(mu: usize, vs: &mut VerifierState, shape: RootShape
             for (value, [left, right]) in values.iter_mut().zip(tails) {
                 *value = interp(left, right, challenge);
             }
-            lambda = vs.sample();
             point = vec![challenge];
             layer -= 1;
             continue;
@@ -491,7 +488,6 @@ pub fn verify_product_triple(mu: usize, vs: &mut VerifierState, shape: RootShape
                 high_challenge,
             );
         }
-        lambda = vs.sample();
         point = vec![low_challenge, high_challenge];
         point.extend_from_slice(&round_point);
         layer -= 2;
