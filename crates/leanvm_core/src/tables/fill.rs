@@ -2,7 +2,7 @@
 
 use super::{ClassTable, Clock};
 use crate::cpu::{Row, Trace};
-use crate::rv::RiscvProgram;
+use crate::rv::{Ext, RiscvProgram};
 use parallel::SendPtr;
 use primitives::field::F64;
 use std::ops::Range;
@@ -205,9 +205,17 @@ impl ClassTable {
         }
         if let Some(limbs) = c.limbs {
             ctx.columns(out, rows, limbs.limbs, |r| r.ext().instance.limbs.map(F64));
-            ctx.columns(out, rows, limbs.new, |r| r.ext().result.c.map(F64));
-            ctx.columns(out, rows, limbs.addresses, |r| r.ext().result.addresses.map(F64));
-            ctx.column(out, rows, limbs.separator, |r| F64(r.ext().result.separator));
+            ctx.columns(out, rows, limbs.new, |r| r.ext().c.map(F64));
+            ctx.columns(out, rows, limbs.addresses, |r| {
+                let x = &r.ext().instance;
+                Ext::OFFSET_LIMBS.map(|k| F64(Ext::bus_address(x.pointers, x.flags, k)))
+            });
+        }
+        if let Some(bits) = c.flag_bits {
+            ctx.columns(out, rows, bits, move |r| {
+                let flags = entry(r).flags;
+                [F64(flags & 1), F64(flags >> 1 & 1)]
+            });
         }
         if let Some(bad) = c.bad {
             ctx.column(out, rows, bad, move |_| F64::ZERO);

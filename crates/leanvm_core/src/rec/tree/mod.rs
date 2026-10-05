@@ -130,7 +130,7 @@ pub enum FalseClaim {
     Matrix {
         /// The table.
         table: &'static str,
-        /// Which of its two circuits.
+        /// Which of its circuits.
         part: Part,
     },
 }
@@ -282,7 +282,7 @@ impl TreeProof {
     /// The header of a tree proof's bytes: the magic `LVMT`, then the tree protocol's version.
     ///
     /// The version is bumped by every change to what a tree proof says.
-    const ENVELOPE: Envelope = Envelope::new(*b"LVMT", 1);
+    const ENVELOPE: Envelope = Envelope::new(*b"LVMT", 2);
 
     /// The kind of node that made the proof.
     #[must_use]
