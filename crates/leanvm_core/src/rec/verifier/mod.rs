@@ -9,6 +9,7 @@ use super::circuit::{Builder, Dw, Ew, Kw};
 use super::transcript::Transcript;
 use crate::leaf::{PublicColumn, PublicColumns};
 use ::pcs::verifier::OpeningVerifier;
+use ::pcs::whir::{Stratum, strata};
 use fiat_shamir::arith::{Arith, Verifier};
 use fiat_shamir::transcript::TranscriptError;
 use primitives::field::F192;
@@ -209,6 +210,13 @@ impl OpeningVerifier for Rows<'_, '_> {
             }
             out.extend((0..n).map(|j| bits[j * depth..(j + 1) * depth].to_vec()));
         }
+        // Each query's top bits are its stratum's, constants of the shape.
+        for (bits, s) in out.iter_mut().zip(strata(count, depth)) {
+            let low = depth - s.bits;
+            for (i, bit) in bits[low..].iter_mut().enumerate() {
+                *bit = self.b.k_const((s.index >> i) as u64 & 1);
+            }
+        }
         out
     }
 
@@ -220,9 +228,7 @@ impl OpeningVerifier for Rows<'_, '_> {
         row_words: usize,
         leaf_words: usize,
     ) -> Result<Vec<Vec<Kw>>, TranscriptError> {
-        Ok((queries.iter())
-            .map(|bits| self.t.open_row(self.b, *root, bits, row_words, leaf_words))
-            .collect())
+        Ok(authenticate(self, *root, queries, row_words, leaf_words))
     }
 
     fn mul_k_add(&mut self, a: Ew, k: Kw, d: Ew) -> Ew {
@@ -237,6 +243,44 @@ impl OpeningVerifier for Rows<'_, '_> {
         let q = self.b.pack(bits);
         self.b.k_to_e1(q)
     }
+}
+
+/// Each query's row, hashed up its own low levels to its stratum's node, every node then tied to `root`.
+///
+/// A query of stratum `(s, j)` is hashed up its `depth - s` low levels to node `j` of the top subtree's level `s`.
+/// The batch's largest group reaches every node of the subtree's bottom level, which is hashed once up to the root; every other query's node is the subtree's.
+/// So each leaf sits `depth` levels below the root, as the shape fixes.
+fn authenticate(
+    r: &mut Rows<'_, '_>,
+    root: Dw,
+    queries: &[Vec<Kw>],
+    row_words: usize,
+    leaf_words: usize,
+) -> Vec<Vec<Kw>> {
+    let depth = queries[0].len();
+    let strata: Vec<Stratum> = strata(queries.len(), depth);
+    let top = strata[0].bits;
+    let mut nodes: Vec<Vec<Option<Dw>>> = (0..=top).map(|s| vec![None; 1 << s]).collect();
+    let tie = |b: &mut Builder, slot: &mut Option<Dw>, node: Dw| match *slot {
+        Some(known) => b.eq_d(known, node),
+        None => *slot = Some(node),
+    };
+    let rows = (queries.iter().zip(&strata))
+        .map(|(bits, s)| {
+            let (node, row) = r.t.open_row(r.b, &bits[..depth - s.bits], row_words, leaf_words);
+            tie(r.b, &mut nodes[s.bits][s.index], node);
+            row
+        })
+        .collect();
+    for s in (1..=top).rev() {
+        for j in 0..1 << (s - 1) {
+            let [left, right] = [2 * j, 2 * j + 1].map(|i| nodes[s][i].expect("the largest group covers its level"));
+            let node = r.b.parent(left, right);
+            tie(r.b, &mut nodes[s - 1][j], node);
+        }
+    }
+    tie(r.b, &mut nodes[0][0], root);
+    rows
 }
 
 /// The value of a read the rows never refuse.
