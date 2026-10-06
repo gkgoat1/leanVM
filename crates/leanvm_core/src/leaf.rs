@@ -11,15 +11,39 @@
 
 use crate::arith::{Arith, Native, Verifier};
 use crate::colval::ColVal;
+#[cfg(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx512f"))]
+use crate::colval::PackedCoeffs;
 use crate::gkr::GkrError;
 use crate::rec::FixedColumn;
 use crate::{PAR_THRESHOLD, gkr};
 use fiat_shamir::transcript::{Challenger, ProverState, TranscriptError, Transmitter};
-use primitives::field::{F64, F192, F192Unreduced};
+use parallel::Chunks;
+#[cfg(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx2"))]
+use primitives::field::MixedSums8;
+use primitives::field::{F64, F192, F192Unreduced, Weights8, dot_base};
+#[cfg(any(
+    all(target_arch = "aarch64", target_feature = "aes"),
+    all(
+        target_arch = "x86_64",
+        target_feature = "pclmulqdq",
+        not(target_feature = "vpclmulqdq")
+    )
+))]
+use primitives::field::{F192x1, F192x1Unreduced};
+#[cfg(not(any(
+    all(target_arch = "aarch64", target_feature = "aes"),
+    all(
+        target_arch = "x86_64",
+        target_feature = "pclmulqdq",
+        not(target_feature = "vpclmulqdq")
+    )
+)))]
+use primitives::field::{mul2, mul4};
 use primitives::multilinear::{eq_table, mle_eval};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::mem::MaybeUninit;
+use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
@@ -377,14 +401,35 @@ fn push_terms<'a>(c: &'a Coord, w: F192, terms: &mut Vec<Term<'a>>, constant: &m
     }
 }
 
+/// Rows per task of a block's leaf fill, a multiple of eight.
+const LEAF_CHUNK: usize = 1 << 10;
+
 /// One tuple's leaves, `β − Σ_i w_i c_i(z)` for every row `z`, into `dst`. The
 /// row-invariant weights and constant coordinates are folded once into `const_part`.
-fn fill_tuple(coords: &[Coord], cols: &[&[F64]], w: &[F192], beta: F192, dst: &mut [MaybeUninit<F192>]) {
+///
+/// With `products`, also the leaves' [`gkr::next_level`] while they are in registers:
+/// `dst` then holds whole groups of eight rows, and `products` a quarter of its length.
+fn fill_tuple(
+    coords: &[Coord],
+    cols: &[&[F64]],
+    w: &[F192],
+    beta: F192,
+    dst: &mut [MaybeUninit<F192>],
+    products: Option<&mut [MaybeUninit<F192>]>,
+) {
     let mut const_part = beta;
     let mut terms: Vec<Term> = Vec::with_capacity(coords.len());
     for (i, c) in coords.iter().enumerate() {
         push_terms(c, w[i], &mut terms, &mut const_part);
     }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            not(target_feature = "vpclmulqdq")
+        )
+    )))]
     let row = |z: usize| -> F192 {
         // The α-weighted coordinate sum defers its reductions: each mixed
         // product contributes its three raw limb products (3 PMULL, no
@@ -401,19 +446,138 @@ fn fill_tuple(coords: &[Coord], cols: &[&[F64]], w: &[F192], beta: F192, dst: &m
         }
         const_part + acc.reduce()
     };
-    if dst.len() >= PAR_THRESHOLD {
-        parallel::fill(dst, |z| MaybeUninit::new(row(z)));
-    } else {
-        for (z, slot) in dst.iter_mut().enumerate() {
-            slot.write(row(z));
+    // Eight rows at once: each term's coefficient meets eight words in one batched
+    // product, and the eight sums reduce together. Elsewhere one row at a time.
+    #[cfg(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx2"))]
+    let rows8 = |z: usize| -> [F192; 8] {
+        let mut sums = MixedSums8::new();
+        for t in &terms {
+            let (c, k) = match t {
+                Term::Col(i, c) => (c, *cols[*i][z..z + 8].as_array().unwrap()),
+                Term::Prod(i, j, c) => (c, std::array::from_fn(|r| cols[*i][z + r] * cols[*j][z + r])),
+                Term::IntIndex(c, shift) => (c, std::array::from_fn(|r| F64(((z + r) as u64) << shift))),
+                Term::Public(vals, c) => (c, *vals[z..z + 8].as_array().unwrap()),
+            };
+            sums.add(*c, k);
         }
+        sums.reduce().map(|s| const_part + s)
+    };
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx2"),
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            not(target_feature = "vpclmulqdq")
+        )
+    )))]
+    let rows8 = |z: usize| -> [F192; 8] { std::array::from_fn(|r| row(z + r)) };
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            not(target_feature = "vpclmulqdq")
+        )
+    )))]
+    let fill = |base: usize, dst: &mut [MaybeUninit<F192>], products: Option<&mut [MaybeUninit<F192>]>| {
+        let (groups, tail) = dst.as_chunks_mut::<8>();
+        let tail_start = base + 8 * groups.len();
+        if let Some(products) = products {
+            debug_assert!(tail.is_empty() && products.len() == 2 * groups.len());
+            for ((g, out), pair) in groups.iter_mut().enumerate().zip(products.as_chunks_mut::<2>().0) {
+                let l = rows8(base + 8 * g);
+                let [a, b, c, d] = mul4([l[0], l[2], l[4], l[6]], [l[1], l[3], l[5], l[7]]);
+                pair.write_copy_of_slice(&mul2([a, c], [b, d]));
+                out.write_copy_of_slice(&l);
+            }
+        } else {
+            for (g, out) in groups.iter_mut().enumerate() {
+                out.write_copy_of_slice(&rows8(base + 8 * g));
+            }
+        }
+        for (r, slot) in tail.iter_mut().enumerate() {
+            slot.write(row(tail_start + r));
+        }
+    };
+    // One row at a time with every value in vector registers from its load to its store: the
+    // terms' products summed unreduced and reduced once, and four rows' product formed from them.
+    #[cfg(any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            not(target_feature = "vpclmulqdq")
+        )
+    ))]
+    let constant = F192x1::new(const_part);
+    #[cfg(any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            not(target_feature = "vpclmulqdq")
+        )
+    ))]
+    let row = |z: usize| -> F192x1 {
+        let mut acc = F192x1Unreduced::zero();
+        for t in &terms {
+            let (c, k) = match t {
+                Term::Col(i, c) => (c, cols[*i][z]),
+                Term::Prod(i, j, c) => (c, cols[*i][z] * cols[*j][z]),
+                Term::IntIndex(c, shift) => (c, F64((z as u64) << shift)),
+                Term::Public(vals, c) => (c, vals[z]),
+            };
+            acc ^= F192x1::load(c).mul_base_unreduced(k);
+        }
+        constant + acc.reduce()
+    };
+    #[cfg(any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            not(target_feature = "vpclmulqdq")
+        )
+    ))]
+    let fill = |base: usize, dst: &mut [MaybeUninit<F192>], products: Option<&mut [MaybeUninit<F192>]>| {
+        if let Some(products) = products {
+            let (quads, tail) = dst.as_chunks_mut::<4>();
+            debug_assert!(tail.is_empty() && products.len() == quads.len());
+            for ((q, [o0, o1, o2, o3]), product) in quads.iter_mut().enumerate().zip(products) {
+                let z = base + 4 * q;
+                let (a, b, c, d) = (row(z), row(z + 1), row(z + 2), row(z + 3));
+                a.store(o0);
+                b.store(o1);
+                c.store(o2);
+                d.store(o3);
+                ((a * b) * (c * d)).store(product);
+            }
+        } else {
+            for (r, slot) in dst.iter_mut().enumerate() {
+                row(base + r).store(slot);
+            }
+        }
+    };
+    if dst.len() >= PAR_THRESHOLD {
+        if let Some(products) = products {
+            let products = Chunks::new(products, LEAF_CHUNK / 4);
+            parallel::chunks_mut(dst, LEAF_CHUNK, |ci, chunk| {
+                // SAFETY: task `ci` alone takes chunk `ci` of the products, the quarter of its rows.
+                fill(ci * LEAF_CHUNK, chunk, Some(unsafe { products.get(ci) }));
+            });
+        } else {
+            parallel::chunks_mut(dst, LEAF_CHUNK, |ci, chunk| fill(ci * LEAF_CHUNK, chunk, None));
+        }
+    } else {
+        fill(0, dst, products);
     }
 }
 
 /// One tuple's leaves over `2^kappa` rows, in a vector of their own.
 fn tuple_leaves(coords: &[Coord], kappa: usize, cols: &[&[F64]], w: &[F192], beta: F192) -> Vec<F192> {
     let mut leaves = Box::new_uninit_slice(1 << kappa);
-    fill_tuple(coords, cols, w, beta, &mut leaves);
+    fill_tuple(coords, cols, w, beta, &mut leaves, None);
     // SAFETY: the fill wrote every slot.
     unsafe { leaves.assume_init() }.into_vec()
 }
@@ -429,7 +593,8 @@ fn producer_leaves(p: &Producer, cols: &[&[F64]], w: &[F192], beta: F192) -> Vec
 /// Build one side's leaf vector: block `b` row `z` holds `β − Σ_i w_i c_i(z)` for
 /// the fingerprint weights `w = eq(α⃗, ·)`, then each producer's bit blocks, bit `i`'s
 /// row `x` holding `(β − π_α(e_x))^{2^i}` where that bit of `m_x` is set and `1` where
-/// it is not, followed implicitly by the identity `1` up to `2^μ`.
+/// it is not, followed implicitly by the identity `1` up to `2^μ`. Returns the leaves
+/// and their first product level, `gkr::next_level`, formed for most blocks in the same pass.
 pub fn build_leaves(
     blocks: &[Block],
     producers: &[Producer],
@@ -437,7 +602,7 @@ pub fn build_leaves(
     cols: &[&[F64]],
     w: &[F192],
     beta: F192,
-) -> Vec<F192> {
+) -> (Vec<F192>, Vec<F192>) {
     let kappas: Vec<usize> = blocks
         .iter()
         .map(|b| b.kappa)
@@ -463,13 +628,26 @@ pub fn build_leaves(
     if covered != explicit {
         slots.fill(MaybeUninit::new(F192::ONE));
     }
+    let n_products = explicit.div_ceil(4);
+    let mut products = Vec::with_capacity(n_products.next_multiple_of(4));
+    let product_slots = &mut products.spare_capacity_mut()[..n_products];
+    let mut fused: Vec<Range<usize>> = Vec::with_capacity(blocks.len());
     // Every row of every block is a real row: a table's height is exactly the
     // number of rows it executed (`cpu::filler`), so no block has padding rows
     // whose tuples would have to be divided back out of the product.
     for (b, blk) in blocks.iter().enumerate() {
-        let off = lay.offsets[b];
-        let dst = &mut slots[off..off + (1usize << blk.kappa)];
-        fill_tuple(&blk.coords, cols, w, beta, dst);
+        let (off, len) = (lay.offsets[b], 1usize << blk.kappa);
+        let dst = &mut slots[off..off + len];
+        // A block of eight rows or more starts at a multiple of its size, so its
+        // four-tuples are its own.
+        if blk.kappa >= 3 {
+            debug_assert!(off.is_multiple_of(len), "a block starts at a multiple of its size");
+            let products = &mut product_slots[off / 4..(off + len) / 4];
+            fill_tuple(&blk.coords, cols, w, beta, dst, Some(products));
+            fused.push(off / 4..(off + len) / 4);
+        } else {
+            fill_tuple(&blk.coords, cols, w, beta, dst, None);
+        }
     }
     let mut b = blocks.len();
     for p in producers {
@@ -491,7 +669,26 @@ pub fn build_leaves(
     }
     // SAFETY: the blocks tile `0..explicit` when they cover it, and the identity fill wrote it otherwise.
     unsafe { leaves.set_len(explicit) };
-    leaves
+    // The products no block fill formed: the small blocks', the producers' and any hole's.
+    fused.sort_unstable_by_key(|r| r.start);
+    let mut start = 0;
+    for r in fused.into_iter().chain(std::iter::once(n_products..n_products)) {
+        if start < r.start {
+            let dst = &mut product_slots[start..r.start];
+            let product = |i: usize| gkr::padded_product(&leaves, start + i);
+            if dst.len() >= PAR_THRESHOLD {
+                parallel::fill(dst, |i| MaybeUninit::new(product(i)));
+            } else {
+                for (i, slot) in dst.iter_mut().enumerate() {
+                    slot.write(product(i));
+                }
+            }
+        }
+        start = start.max(r.end);
+    }
+    // SAFETY: the block fills wrote the ranges in `fused`, and the pass above every slot between them.
+    unsafe { products.set_len(n_products) };
+    (leaves, products)
 }
 
 /// What the producer's air sums against `eq(ζ, ·)` (§sec:lookup): its bits as `E`
@@ -716,14 +913,18 @@ impl BusForm {
     /// rather than paying one per term.
     /// `quadratic` selects only degree-two terms, for a sumcheck round coefficient.
     pub fn eval_unreduced<T: ColVal>(&self, evals: &[T], quadratic: bool) -> T::Unreduced {
-        self.prods.iter().fold(
-            if quadratic {
-                T::lift(F192::ZERO)
-            } else {
-                T::dot_unreduced(&self.coeffs, evals) ^ T::lift(self.constant)
-            },
-            |acc, &(a, b, c)| acc ^ (evals[a] * evals[b]).mul_e_unreduced(c),
-        )
+        let linear = if quadratic {
+            T::lift(F192::ZERO)
+        } else {
+            T::dot_unreduced(&self.coeffs, evals) ^ T::lift(self.constant)
+        };
+        self.add_products(evals, linear)
+    }
+
+    /// `acc` plus the form's products at `evals`.
+    #[inline(always)]
+    fn add_products<T: ColVal>(&self, evals: &[T], acc: T::Unreduced) -> T::Unreduced {
+        (self.prods.iter()).fold(acc, |acc, &(a, b, c)| acc ^ (evals[a] * evals[b]).mul_e_unreduced(c))
     }
 
     /// [`eval_unreduced`](Self::eval_unreduced) on its own.
@@ -745,6 +946,41 @@ impl BusForm {
                     .expect("every pair was summed");
                 acc + c * s.2
             })
+    }
+}
+
+/// A form as the prover's table sumcheck evaluates it per row, on AVX-512 its linear
+/// coefficients packed for [`dot_base`].
+#[derive(Clone, Debug)]
+pub struct PackedForm {
+    form: BusForm,
+    #[cfg(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx512f"))]
+    packed: PackedCoeffs,
+}
+
+impl PackedForm {
+    #[cfg_attr(
+        not(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx512f")),
+        expect(clippy::missing_const_for_fn, reason = "const only where nothing is packed")
+    )]
+    pub fn new(form: BusForm) -> Self {
+        Self {
+            #[cfg(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx512f"))]
+            packed: PackedCoeffs::new(&form.coeffs),
+            form,
+        }
+    }
+
+    /// [`BusForm::eval_unreduced`], on AVX-512 its linear part one batched dot product
+    /// where `evals` is a row padded to the packed width.
+    #[inline(always)]
+    pub fn eval_unreduced<T: ColVal>(&self, evals: &[T], quadratic: bool) -> T::Unreduced {
+        #[cfg(all(target_arch = "x86_64", target_feature = "vpclmulqdq", target_feature = "avx512f"))]
+        if !quadratic && evals.len() == self.packed.width() {
+            let linear = T::dot_packed(&self.packed, evals) ^ T::lift(self.form.constant);
+            return self.form.add_products(evals, linear);
+        }
+        self.form.eval_unreduced(evals, quadratic)
     }
 }
 
@@ -1318,22 +1554,34 @@ fn tables_and_prods_at(
 
             let eq = eq_table(&zeta[..tau]);
             let n_acc = n_cols + pairs.len();
-            let sums = parallel::fold_reduce(
+            // A task packs its eq slice once, then every column and pair dots against it
+            // eight rows at a time; a slice short of eight rows takes the scalar path.
+            let sums = parallel::map_reduce_with_state(
                 (1usize << tau).div_ceil(ROWS),
+                || (Vec::with_capacity(ROWS / 8), Vec::with_capacity(ROWS)),
                 || vec![F192Unreduced::ZERO; n_acc],
-                |acc, chunk| {
+                |(packed, products): &mut (Vec<Weights8>, Vec<F64>), acc, chunk| {
                     let lo = chunk * ROWS;
                     let weights = &eq[lo..(lo + ROWS).min(1 << tau)];
                     let span = |c: usize| &cols[base + c][lo..lo + weights.len()];
+                    let (blocks, tail) = weights.as_chunks::<8>();
+                    let split = 8 * blocks.len();
+                    packed.clear();
+                    packed.extend(blocks.iter().map(Weights8::new));
+                    let dot = |k: &[F64]| {
+                        tail.iter()
+                            .zip(&k[split..])
+                            .fold(dot_base(packed, &k[..split]), |acc, (&w, &v)| {
+                                acc ^ w.mul_base_unreduced(v)
+                            })
+                    };
                     for (c, slot) in acc[..n_cols].iter_mut().enumerate() {
-                        for (&w, &v) in weights.iter().zip(span(c)) {
-                            *slot ^= w.mul_base_unreduced(v);
-                        }
+                        *slot ^= dot(span(c));
                     }
                     for (&(a, b), slot) in pairs.iter().zip(&mut acc[n_cols..]) {
-                        for ((&w, &x), &y) in weights.iter().zip(span(a)).zip(span(b)) {
-                            *slot ^= w.mul_base_unreduced(x * y);
-                        }
+                        products.clear();
+                        products.extend(span(a).iter().zip(span(b)).map(|(&x, &y)| x * y));
+                        *slot ^= dot(products);
                     }
                 },
                 |mut left, right| {
@@ -1450,7 +1698,8 @@ pub fn verify_balance<V: Verifier>(
 pub(crate) mod tests {
     use super::{
         BUS_SOUNDNESS_BITS, Block, BusError, BusSetup, Coord, F64, F192, N_TUPLE_BITS, Producer, PublicColumn,
-        SparseColumn, fingerprint_weights, prove_balance, soundness_bits, tuple_leaves, verify_balance,
+        SparseColumn, build_leaves, fingerprint_weights, gkr, layout, prove_balance, soundness_bits, tuple_leaves,
+        verify_balance,
     };
     use crate::cpu::{Layout, Lookup, Program, Sizes, UNGROUND_LOG_BYTECODE};
     use crate::pcs::MAX_MU;
@@ -1561,6 +1810,53 @@ pub(crate) mod tests {
             column.eval(&point),
             primitives::multilinear::mle_eval(column.dense(), &point)
         );
+    }
+
+    /// The first product level `build_leaves` returns is `gkr::next_level` of its leaves,
+    /// whichever way each four-tuple's product was formed: in a block's fill (eight rows
+    /// or more, a parallel one at `PAR_THRESHOLD`), or after it (smaller blocks, a
+    /// producer's bits, and the ragged last four-tuple).
+    #[test]
+    fn build_leaves_forms_the_first_product_level() {
+        let rows = 1u64 << 11;
+        let cols: Vec<Vec<F64>> = (0..3u64)
+            .map(|c| {
+                (0..rows)
+                    .map(|z| F64((z + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (c << 40)))
+                    .collect()
+            })
+            .collect();
+        let cols: Vec<&[F64]> = cols.iter().map(Vec::as_slice).collect();
+        let coords = || {
+            vec![
+                Coord::Const(F64(7)),
+                Coord::IntIndex {
+                    base: F64(0x4000),
+                    shift: 3,
+                },
+                Coord::Col(0),
+                Coord::Prod(1, 2),
+            ]
+        };
+        // Out of size order, so the layout moves every block.
+        let blocks: Vec<Block> = [2, 0, 11, 3, 1]
+            .into_iter()
+            .map(|kappa| Block::framework(kappa, coords()))
+            .collect();
+        let producers = [Producer {
+            kappa: 4,
+            coords: vec![Coord::Col(1)],
+            col: 2,
+            bits: 2,
+        }];
+        let lay = layout(&blocks, &producers);
+        let alphas: Vec<F192> = (0..N_TUPLE_BITS as u64)
+            .map(|i| F192::new(3 + i, 5 + 7 * i, 11))
+            .collect();
+        let w = fingerprint_weights(&alphas);
+        let (leaves, products) = build_leaves(&blocks, &producers, &lay, &cols, &w, F192::new(13, 17, 19));
+        assert_eq!(leaves.len(), (1 << 11) + 8 + 2 * 16 + 4 + 2 + 1);
+        assert_eq!(products, gkr::next_level(&leaves));
     }
 
     /// The bound is `N_TUPLE_BITS` per linear factor plus the GKR terms: the

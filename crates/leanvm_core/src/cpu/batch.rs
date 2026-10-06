@@ -14,7 +14,7 @@ use crate::arith::{Arith, Native};
 use crate::colval::ColVal;
 use crate::constraints::{Air, BitColumns, Residual, Summand};
 use crate::leaf;
-use crate::leaf::{BusForm, BusProof, BusVerify, Producer};
+use crate::leaf::{BusForm, BusProof, BusVerify, PackedForm, Producer};
 use crate::tables::ClassTable;
 use primitives::field::F192;
 
@@ -123,7 +123,7 @@ impl Batch {
                     n_cols: table.summed_columns().len(),
                     n_public: 0,
                     bits: table.summed_bits(),
-                    summand: Term::Table(summand),
+                    summand: Term::Table(PackedForm::new(summand)),
                 }
             },
         );
@@ -153,7 +153,7 @@ impl Batch {
 /// One term of the batch: a table's, or a lookup producer's.
 pub(super) enum Term {
     /// A table's two bus forms, already summed with their side weights.
-    Table(BusForm),
+    Table(PackedForm),
     /// A producer's share of the push side.
     Producer(ProducerTerm),
 }
