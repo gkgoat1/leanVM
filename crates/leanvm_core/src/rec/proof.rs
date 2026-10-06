@@ -19,6 +19,7 @@ use crate::{constraints, pcs, witness};
 use ::pcs::verifier::OpeningVerifier;
 use fiat_shamir::arith::Verifier;
 use fiat_shamir::transcript::{Challenger, ProofTranscript, ProverState, RawProof, VerifierState};
+use flock::Witness;
 use flock::lincheck::MatrixClaim;
 use flock::reduction::{self, Instance};
 use flock::verifier::FlockError;
@@ -34,7 +35,7 @@ pub fn statement_seed(statement: &[Limbs]) -> [F64; 4] {
 struct RecWitness {
     q: Vec<F64>,
     ports: Vec<(usize, Vec<F64>)>,
-    batch: Instance<'static>,
+    batch: Witness,
 }
 
 /// The bus and the constraint batch over the owned tables, which leave the column claims the opening settles.
@@ -45,20 +46,15 @@ pub(crate) struct TableArgument<'a> {
 
 impl HashFlock {
     /// Every hash row's packed witness, at the hash table's height `2^tau`.
-    fn instance(hash: &[Compression], tau: usize) -> Instance<'static> {
-        let circuit = Self::circuit();
-        let witness = circuit.generate_witness_with(hash, &Compression::PADDING, tau, |row, z, az, bz| {
+    fn witness(hash: &[Compression], tau: usize) -> Witness {
+        Self::circuit().generate_witness_with(hash, &Compression::PADDING, tau, |row, z, az, bz| {
             blake2s_witness(row.inputs(), z, az, bz);
-        });
-        Instance {
-            block: circuit.block(),
-            n_blocks_log: tau,
-            witness,
-        }
+        })
     }
 
     /// Prove every hash row: zerocheck, then lincheck, a batch of one circuit, to one ring-switched claim on the packed witness.
-    fn prove(instance: Instance<'static>, layout: &RecLayout, ps: &mut ProverState) -> RingSwitch {
+    fn prove(witness: &Witness, layout: &RecLayout, ps: &mut ProverState) -> RingSwitch {
+        let instance = Instance::of(Self::circuit().block(), layout.tau(Table::Hash), witness);
         let [reduced] = <[_; 1]>::try_from(reduction::prove(&[instance], ps)).expect("one circuit");
         layout.hash_window().ring(reduced)
     }
@@ -74,17 +70,12 @@ impl RecWitness {
             table.fill(a, &mut windows[RecLayout::columns(table)]);
         }
 
-        let batch = HashFlock::instance(&a.hash, layout.tau(Table::Hash));
-        parallel::chunks_mut_zip(
-            windows[RecLayout::HASH_WITNESS],
-            &batch.witness.z,
-            1 << 16,
-            |_, dst, src| {
-                for (d, &s) in dst.iter_mut().zip(src) {
-                    *d = F64(s);
-                }
-            },
-        );
+        let batch = HashFlock::witness(&a.hash, layout.tau(Table::Hash));
+        parallel::chunks_mut_zip(windows[RecLayout::HASH_WITNESS], &batch.z, 1 << 16, |_, dst, src| {
+            for (d, &s) in dst.iter_mut().zip(src) {
+                *d = F64(s);
+            }
+        });
         drop(windows);
         // SAFETY: the windows tile the stack up to its zeroed tail, and each was filled above.
         let q = unsafe { q.assume_init() }.into_vec();
@@ -95,7 +86,7 @@ impl RecWitness {
         let ports = (0..HashFlock::N_PORTS)
             .map(|port| {
                 let values = (0..1 << layout.tau(Table::Hash))
-                    .map(|j| F64(batch.witness.z[(j << stride_log) + port]))
+                    .map(|j| F64(batch.z[(j << stride_log) + port]))
                     .collect();
                 (ports_at + port, values)
             })
@@ -234,7 +225,8 @@ impl Circuit {
 
         let RecWitness { q, ports, batch } = w;
         drop(ports);
-        let ring = crate::stage!("Flock reduction", || HashFlock::prove(batch, &layout, &mut ps));
+        let ring = crate::stage!("Flock reduction", || HashFlock::prove(&batch, &layout, &mut ps));
+        drop(batch);
         crate::stage!("PCS open", || pcs::open(&mut ps, &committed, &q, &slots, &[ring]));
         Ok(ps.into_proof())
     }

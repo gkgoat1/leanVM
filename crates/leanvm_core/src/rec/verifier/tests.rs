@@ -14,7 +14,8 @@ use crate::rv::Region;
 use crate::rv::asm::*;
 use crate::tables::{Fill, N_TABLES, PerTable, TableId};
 use crate::witness::StackShape;
-use ::flock::reduction::{self, Instance, ReductionReplay, Shape};
+use ::flock::Witness;
+use ::flock::reduction::{self, Block, Instance, ReductionReplay, Shape};
 use ::flock::verifier::FlockError;
 use ::flock::zerocheck::K_SKIP;
 use ::pcs::whir::{WhirError, inner_product_base_ext, strata};
@@ -281,7 +282,13 @@ fn raw(proof: &ProofTranscript) -> RawProof {
 }
 
 // Packed witness `f`'s batch over `rows`, as the prover holds it.
-fn batch<const N: usize>(f: FlockId, rows: &[[u64; N]]) -> Instance<'static> {
+struct Batch {
+    block: Block<'static>,
+    n_blocks_log: usize,
+    witness: Witness,
+}
+
+fn batch<const N: usize>(f: FlockId, rows: &[[u64; N]]) -> Batch {
     let (circuit, spec) = (f.circuit(), f.table().spec());
     let n_blocks_log = spec.n_blocks_log(rows.len());
     let witness = match spec.circuit.as_ref().map(|c| c.fill) {
@@ -290,7 +297,7 @@ fn batch<const N: usize>(f: FlockId, rows: &[[u64; N]]) -> Instance<'static> {
         }
         _ => circuit.generate_witness(rows, n_blocks_log),
     };
-    Instance {
+    Batch {
         block: circuit.block(),
         n_blocks_log,
         witness,
@@ -298,10 +305,13 @@ fn batch<const N: usize>(f: FlockId, rows: &[[u64; N]]) -> Instance<'static> {
 }
 
 // The reduction's matrix claims settle, its rows read the whole proof and are the shape's, and a tampered scalar fails both verifiers at one stage.
-fn check_reductions(batches: &[Instance<'static>]) {
+fn check_reductions(batches: &[Batch]) {
     let proof = {
+        let instances: Vec<Instance<'_>> = (batches.iter())
+            .map(|batch| Instance::of(batch.block, batch.n_blocks_log, &batch.witness))
+            .collect();
         let mut ps = ProverState::from_label(LABEL);
-        reduction::prove(batches, &mut ps);
+        reduction::prove(&instances, &mut ps);
         ps.into_proof()
     };
     let circuits: Vec<(Shape, usize)> = (batches.iter())
@@ -389,13 +399,13 @@ fn check_reductions(batches: &[Instance<'static>]) {
     }
 }
 
-fn hash_batch(seed: u64) -> Instance<'static> {
+fn hash_batch(seed: u64) -> Batch {
     let mut rng = Rng::new(seed);
     let rows: Vec<[u64; 14]> = (0..5).map(|_| std::array::from_fn(|_| rng.next_u64())).collect();
     batch(HashFlock::FLOCK, &rows)
 }
 
-fn ld_batch(seed: u64, n: usize) -> Instance<'static> {
+fn ld_batch(seed: u64, n: usize) -> Batch {
     let mut rng = Rng::new(seed);
     let rows: Vec<[u64; 2]> = (0..n).map(|_| [rng.next_u64(), rng.next_u64()]).collect();
     batch(FlockId::class(TableId::LD).unwrap(), &rows)
