@@ -35,7 +35,7 @@
 //! `current_claim = (1+r_now)·G(0) + r_now·G(1)`.
 
 use crate::zerocheck::PaddingSpec;
-use crate::zerocheck::univariate_skip::EQ_HIGH_VARS;
+use crate::zerocheck::round1::EQ_HIGH_VARS;
 use parallel::Chunks;
 use primitives::bit_fold::{BLOCK, BitFold};
 use primitives::field::{F192, F192Unreduced};
@@ -74,14 +74,6 @@ fn mul_quad_unreduced(
         a.3.mul_unreduced(b.3),
     )
 }
-
-// ---------------------------------------------------------------------------
-// Fold a Boolean witness at z.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Naive round-2 prover message (AB-pair multilinear sumcheck).
-// ---------------------------------------------------------------------------
 
 /// Single-table sibling of [`round_pair_naive`], for the linear `c` term:
 /// `G_c(1) = Σ_{x'} eq(r_eq, x') · c_mlv(1, x')`. Linear, so no `G(∞)`.
@@ -131,10 +123,6 @@ pub(crate) fn round_pair_naive(a_mlv: &[F192], b_mlv: &[F192], r_eq: &[F192]) ->
     }
     (g_one, g_inf)
 }
-
-// ---------------------------------------------------------------------------
-// Bit-resident rounds: fold and message straight from the packed witness.
-// ---------------------------------------------------------------------------
 
 /// Returns `(pair_in_block_mask, live_pairs)` for a round whose positions each cover `2^position_log` witness bits.
 ///
@@ -696,10 +684,6 @@ fn fold_and_round_pair_kernel<const K: usize>(
     RoundPair::from_sums(sums, r_v)
 }
 
-// ---------------------------------------------------------------------------
-// Subsequent multilinear rounds (3..(m−k_skip+1)): fold + next message.
-// ---------------------------------------------------------------------------
-
 /// In-place fold of a single multilinear polynomial table at `challenge`.
 /// Pairs `(a[2x], a[2x+1])` collapse to `a[x] = a[2x] + challenge · (a[2x+1] + a[2x])`.
 /// After the call, `a.len()` is halved.
@@ -832,18 +816,14 @@ mod planar {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zerocheck::univariate_skip::tests::pack_bits;
-    use crate::zerocheck::univariate_skip_optimized::{
+    use crate::zerocheck::ntt::{AdditiveNttGf8, InvNttTableByteSingleGf8};
+    use crate::zerocheck::round1::tests::pack_bits;
+    use crate::zerocheck::round1::{
         c_s, medium_challenges, round1_shift_reduce_extract_c_packed_padded, small_challenges,
     };
-    use pcs::ntt::{AdditiveNttGf8, InvNttTableByteSingleGf8};
     use primitives::field::F8;
     use primitives::field::PHI_8_TABLE_192;
     use primitives::multilinear::{barycentric_sum, skip_lagrange_weights, window_denominator};
@@ -1000,7 +980,6 @@ mod tests {
                 &b_packed,
                 &c_packed,
                 m,
-                K_SKIP,
                 &r,
                 &inv_table,
                 &PaddingSpec::dense(m),
