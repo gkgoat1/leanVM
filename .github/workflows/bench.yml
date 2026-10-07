@@ -8,20 +8,38 @@ name: Bench
 # A job is one CLI benchmark, or one `benches/` target with all the benchmarks it prints.
 # scripts/ab.sh does all of it, and runs the same comparison on a developer's machine.
 #
-# The testbeds are GitHub-hosted runners, forks' PRs included. Each pins its ISA:
-# `target-cpu=native` would build for whichever CPU the job lands on, and a cached build then
-# dies of SIGILL on an older one (see rust.yml).
+# The x86-64 testbed is the self-hosted runner `size-attester7870-x64` (with `self-hosted-ghr`,
+# an ephemeral VM per job: an Intel Xeon Gold 6548N, 32 vCPUs, 64 GB): base and PR build and
+# run on that one machine, so it is built for
+# `target-cpu=native`, AVX-512, VPCLMULQDQ and GFNI included, and its cache is keyed on the CPU
+# model so a native build never lands on another CPU. A fork has no such runner, so in a fork's
+# own repository the testbed falls back to a GitHub-hosted runner built for haswell (a fork's PR
+# to this repository runs here, on the self-hosted runner). The arm64 testbed is GitHub-hosted
+# and pins its ISA: `target-cpu=native` would build for whichever CPU the job lands on, and a
+# cached build then dies of SIGILL on an older one (see rust.yml).
+#
+# Run from the Actions tab (`workflow_dispatch`), it compares any two refs the same way: `head`
+# (default: the branch it is run on) against `base` (default: the head's first parent). Such a
+# run leaves its artifacts only; bench-comment.yml posts for PRs alone.
 
 on:
   pull_request:
     # Not `edited`: a description edit would restart, and so cancel, the PR's run.
     types: [ opened, reopened, synchronize ]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Base: a branch, tag or commit (default: the head's first parent)"
+        required: false
+      head:
+        description: "Head: a branch, tag or commit (default: the branch this runs on)"
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: bench-${{ github.ref }}
+  group: bench-${{ github.ref }}-${{ inputs.base }}-${{ inputs.head }}
   cancel-in-progress: true
 
 env:
@@ -39,8 +57,8 @@ jobs:
       matrix:
         testbed:
           - name: x86-64
-            runner: ubuntu-latest
-            rustflags: -C target-cpu=haswell
+            runner: ${{ github.repository == 'leanEthereum/leanVM' && fromJSON('["size-attester7870-x64", "self-hosted-ghr"]') || 'ubuntu-latest' }}
+            rustflags: ${{ github.repository == 'leanEthereum/leanVM' && '-C target-cpu=native' || '-C target-cpu=haswell' }}
           # The NEON kernels, which are chosen at compile time on `aes` (PMULL) and `sha3`
           # (EOR3), neither of which a generic aarch64 target enables.
           - name: arm64
@@ -75,24 +93,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The merge commit and its first parent, the base.
+          ref: ${{ inputs.head }}
+          # The head (a PR's merge commit) and its first parent, the default base.
           fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
+      # What the x86 build can use, so the PR comment's numbers can be read against the hardware.
+      # The model goes into the cache key: a native build is only reused on the CPU it was built for.
+      - name: CPU
+        id: cpu
+        if: runner.arch == 'X64'
+        run: |
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket|L2 cache|L3 cache):'
+          free -g | grep -E '^Mem:'
+          flags=$(grep -m1 -E '^flags' /proc/cpuinfo)
+          for f in avx2 avx512f avx512bw avx512vl avx512vbmi avx512ifma vpclmulqdq gfni; do
+            if grep -qw "$f" <<<"$flags"; then echo "$f: yes"; else echo "$f: no"; fi
+          done
+          echo "model=-$(lscpu | sed -n 's/^Model name: *//p' | head -n1 | tr -c 'A-Za-z0-9\n' '-')" >> "$GITHUB_OUTPUT"
       # The CPU the testbed's ISA is pinned for must have what it enables, or it dies of SIGILL.
       - name: CPU features
         if: runner.os == 'Linux' && runner.arch == 'ARM64'
         run: |
           grep -m1 -E '^Features' /proc/cpuinfo
           for f in aes pmull sha3 sve2; do grep -qw "$f" <(grep -m1 -E '^Features' /proc/cpuinfo) || { echo "::error::no $f on this runner"; exit 1; }; done
-      # One cache per testbed; RUSTFLAGS is part of its key.
+      # One cache per testbed, and on x86 per CPU model; RUSTFLAGS is part of its key.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.testbed.name }}
+          key: ${{ matrix.testbed.name }}${{ steps.cpu.outputs.model }}
       - name: Prove the PR and its base in turns
         env:
           PR: ${{ github.event.number }}
           TESTBED: ${{ matrix.testbed.name }}
-        run: scripts/ab.sh --ci --pr "$PR" --testbed "$TESTBED" --out ab "$BENCHMARK"
+          BASE: ${{ inputs.base }}
+        run: |
+          args=(--ci --testbed "$TESTBED" --out ab)
+          if [ -n "$PR" ]; then args+=(--pr "$PR"); fi
+          if [ -n "$BASE" ]; then
+            git fetch --quiet --no-tags --depth=1 origin "$BASE"
+            args+=(--base "$(git rev-parse FETCH_HEAD)")
+          fi
+          scripts/ab.sh "${args[@]}" "$BENCHMARK"
       - uses: actions/upload-artifact@v4
         with:
           name: ab-${{ matrix.testbed.name }}-${{ matrix.benchmark.name }}
