@@ -164,6 +164,8 @@ fn sliced_hi_bits(n: usize) -> usize {
 }
 
 /// The weight `Phi(scale·eq(point, ·))` of a claim, without materializing it.
+///
+/// Composed maps dispatch across the pool; call this outside a parallel dispatch.
 pub(crate) fn deferred_weight(point: &[F192], scale: F192, coordinate_weights: &[F192]) -> DeferredWeight {
     let n = point.len();
     let n_lo = if n >= 6 { n - sliced_hi_bits(n) } else { split_n_lo(n) };
@@ -174,7 +176,7 @@ pub(crate) fn deferred_weight(point: &[F192], scale: F192, coordinate_weights: &
     let map = F192Map::new(coordinate_weights);
     let sliced = (n_lo >= 6).then(|| {
         let blocks = eq_lo.as_chunks::<BLOCK>().0.iter().map(Sliced::new).collect();
-        let maps = eq_hi.iter().map(|&e| map.after_mul(e)).collect();
+        let maps = parallel::map_collect(eq_hi.len(), |hi| map.after_mul(eq_hi[hi]));
         (blocks, maps)
     });
     DeferredWeight {
