@@ -8,10 +8,9 @@
 
 use super::add::Adder;
 use super::mul::Multiplier;
-use super::{InstanceTables, or_bits};
 use crate::circuit::{Builder, Circuit};
 use crate::reduction::Block;
-use crate::witness::Witness;
+use crate::witness::{InstanceRows, Witness};
 
 /// The first slot of `a`.
 pub(crate) const A_BASE: usize = 0;
@@ -42,15 +41,6 @@ impl U64Op {
             Self::WrappingAdd | Self::WrappingMul => 64,
             Self::WideningMul => 128,
         }
-    }
-}
-
-impl InstanceTables<'_> {
-    /// `width` rows from `slot` whose right factor is the constant: `A z = z = v`, `B z = 1`.
-    fn unit_rows(&mut self, slot: usize, v: u128, width: usize) {
-        or_bits(self.z, slot, v);
-        or_bits(self.az, slot, v);
-        or_bits(self.bz, slot, u128::MAX >> (128 - width));
     }
 }
 
@@ -117,17 +107,17 @@ impl U64Circuit {
         let n = self.op.out_bits();
         self.circuit
             .witness_by_instance(pairs, &(0, 0), n_blocks_log, |&(a, b), z, az, bz| {
-                let mut tables = InstanceTables { z, az, bz };
+                let mut rows = InstanceRows::new(z, az, bz);
                 // The operation's products, by word arithmetic.
                 let out = match &self.plan {
-                    Plan::Add(adder) => adder.witness(a, b, &mut tables),
-                    Plan::Mul(multiplier) => multiplier.witness_into(a, b, &mut tables),
+                    Plan::Add(adder) => adder.witness(a, b, &mut rows),
+                    Plan::Mul(multiplier) => multiplier.witness_into(a, b, &mut rows),
                 };
                 // The ports and the constant, each a row against the constant.
-                tables.unit_rows(A_BASE, u128::from(a), 64);
-                tables.unit_rows(B_BASE, u128::from(b), 64);
-                tables.unit_rows(OUT_BASE, out, n);
-                tables.unit_rows(self.circuit.const_pos(), 1, 1);
+                rows.affine(A_BASE, u128::from(a), 64);
+                rows.affine(B_BASE, u128::from(b), 64);
+                rows.affine(OUT_BASE, out, n);
+                rows.constant(self.circuit.const_pos());
             })
     }
 }
