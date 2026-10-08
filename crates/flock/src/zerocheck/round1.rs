@@ -36,6 +36,11 @@
 //!    `β_i = γ^{2^{i-1}} / (1 + γ^{2^{i-1}})`, which makes
 //!    `eq_med[b] = γ^b / D` for `D = ∏(1+γ^{2^{i-1}})`.
 //!    A precomputed `convert[b][v] = γ^b · φ_8(v)` table replaces field multiplications with lookups and XORs.
+//!    On ARM, conversion visits all lanes for a bounded group of four medium rows before
+//!    advancing to the next group. Two stack-resident lane arrays retain the unweighted
+//!    sums across groups; the equality weight is applied only after the complete window,
+//!    including a partial final group. This traversal leaves the packed AB sweep and C
+//!    transpose unchanged.
 //!
 //! 3. **D⁻¹ absorbed into eq_lo.**
 //!    Pre-scale `eq_lo[i] ← eq_lo[i] · D⁻¹` once before the loop; this cancels
@@ -693,6 +698,30 @@ impl Convert {
     #[inline(always)]
     fn accumulate(&mut self, ab: &[[u8; 64]], c: &[[u8; 64]], eq_lo: F192) {
         let convert = convert_table();
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Keep a bounded group of conversion rows active while amortizing
+            // scratch updates across its medium positions.
+            let mut converted_ab = [F192::ZERO; ELL];
+            let mut converted_c = [F192::ZERO; ELL];
+            for ((rows, ab), c) in convert.chunks(4).zip(ab.chunks(4)).zip(c.chunks(4)) {
+                for lane in 0..ELL {
+                    let mut cf_ab = F192::ZERO;
+                    let mut cf_c = F192::ZERO;
+                    for ((row, ab), c) in rows.iter().zip(ab).zip(c) {
+                        cf_ab += row[ab[lane] as usize];
+                        cf_c += row[c[lane] as usize];
+                    }
+                    converted_ab[lane] += cf_ab;
+                    converted_c[lane] += cf_c;
+                }
+            }
+            for lane in 0..ELL {
+                self.ab[lane] += converted_ab[lane] * eq_lo;
+                self.c[lane] += converted_c[lane] * eq_lo;
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for lane in 0..ELL {
             let mut cf_ab = F192::ZERO;
             let mut cf_c = F192::ZERO;
@@ -1325,8 +1354,8 @@ pub(crate) mod tests {
         let mut rng = Rng::new(0xC0_4E27);
         let mut partials = Convert::new();
         let (mut want_ab, mut want_c) = ([F192::ZERO; ELL], [F192::ZERO; ELL]);
-        // Two full windows of 16 medium positions, then a boundary window of 7.
-        for n in [16, 16, 7] {
+        // Repeated full windows followed by every possible boundary length.
+        for n in [16, 16].into_iter().chain(0..16) {
             let ab: Vec<[u8; 64]> = (0..n).map(|_| std::array::from_fn(|_| rng.next_u64() as u8)).collect();
             let c: Vec<[u8; 64]> = (0..n).map(|_| std::array::from_fn(|_| rng.next_u64() as u8)).collect();
             let eq = rng.ext();
