@@ -24,7 +24,8 @@ def desktop_fixture(plan, testbed, benchmark):
         value = (1, 9, 2)[(number - 1) % 3] * 1_000_000_000
         results = {name: {"latency": {"value": value, "lower_value": value, "upper_value": value},
                           "verify": {"value": 10, "lower_value": 5, "upper_value": 15},
-                          "proof-size": {"value": 1024},
+                          "proof-size": {"value": 1024}, "threads": {"value": count},
+                          "performance-threads": {"value": count}, "efficiency-threads": {"value": 0},
                           "peak-memory": {"value": (7, 3, 5)[(number - 1) % 3] * 1024 ** 2}}
                    for name in site.expected_results(benchmark)}
         samples.append({"round": number, "measured_at": MEASURED, "exit_code": 0, "threads": count, "results": results})
@@ -114,7 +115,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(aggregate[0]["verification"]["parameters"]["aggregation_log_inv_rate"], 1)
 
     def test_aggregation_keeps_each_levels_round_maximum(self):
-        benchmark = "aggregate-leanxmss-100-2to1"
+        benchmark = "aggregate-leanxmss-100-2to1-16thread"
         document = desktop_fixture(self.plan, "x86-64", benchmark)
         for sample, first, node in zip(document["samples"], (11, 4, 8), (13, 17, 12)):
             sample["results"][benchmark + "-first"]["peak-memory"]["value"] = first * 1024
@@ -242,9 +243,9 @@ class SnapshotTests(unittest.TestCase):
         self.assert_refused_without_mutation()
 
     def test_aggregation_requires_both_levels(self):
-        path = self.artifacts / "snapshot-result-desktop-arm64-aggregate-leanxmss-100-2to1" / "result.json"
+        path = self.artifacts / "snapshot-result-desktop-arm64-aggregate-leanxmss-100-2to1-16thread" / "result.json"
         document = site.load(path)
-        document["samples"][0]["results"].pop("aggregate-leanxmss-100-2to1-node")
+        document["samples"][0]["results"].pop("aggregate-leanxmss-100-2to1-16thread-node")
         self.save(path, document)
         self.assert_refused_without_mutation()
 
@@ -261,8 +262,8 @@ class SnapshotTests(unittest.TestCase):
                          {original["machine"]["memory_bytes"], varied["machine"]["memory_bytes"]})
         self.assertEqual(len(snapshot["results"]), 56)
 
-    def test_changed_platform_or_default_allocation_cannot_replace_snapshot(self):
-        path = self.artifacts / "snapshot-result-desktop-x86-64-hash-50000" / "result.json"
+    def test_changed_platform_or_fixed_allocation_cannot_replace_snapshot(self):
+        path = self.artifacts / "snapshot-result-desktop-x86-64-hash-50000-16thread" / "result.json"
         original = site.load(path)
         for field, value in (("cpu", "Other CPU"), ("os", "Linux other"),
                              ("logical_cpus", 32), ("arch", "arm64")):
@@ -295,6 +296,36 @@ class SnapshotTests(unittest.TestCase):
                     document["samples"][0]["exit_code"] = 1
                 self.save(self.desktop, document)
                 self.assert_refused_without_mutation()
+
+    def test_fixed16_requires_actual_pool_evidence_without_relabeling_history(self):
+        benchmark = "hash-50000-16thread"
+        path = self.artifacts / f"snapshot-result-desktop-x86-64-{benchmark}" / "result.json"
+        original = site.load(path)
+        for mutation in ("missing", "wrong-count", "extra-efficiency", "historical-name"):
+            with self.subTest(mutation=mutation):
+                document = deepcopy(original)
+                results = document["samples"][0]["results"]
+                metrics = results[benchmark]
+                if mutation == "missing":
+                    del metrics["threads"]
+                elif mutation == "wrong-count":
+                    metrics["threads"]["value"] = 8
+                elif mutation == "extra-efficiency":
+                    metrics["performance-threads"]["value"] = 15
+                    metrics["efficiency-threads"]["value"] = 1
+                else:
+                    results["hash-50000"] = results.pop(benchmark)
+                self.save(path, document)
+                self.assert_refused_without_mutation()
+
+    def test_unspecified_historical_plan_cannot_be_used_as_fixed16(self):
+        plan = deepcopy(self.plan)
+        plan["desktop"]["benchmarks"] = [
+            name.replace("-16thread", "") for name in plan["desktop"]["benchmarks"]
+        ]
+        with self.assertRaises(ValueError):
+            site.validate_plan(plan)
+        self.assertIsNone(site.workload("hash-50000")[4])
 
     def test_failed_atomic_replace_preserves_previous_snapshot(self):
         self.output.write_bytes(b"previous")
